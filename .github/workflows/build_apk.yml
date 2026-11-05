@@ -27,6 +27,9 @@ jobs:
       - name: Install Dependencies
         run: flutter pub get
 
+      - name: Verify Dart Syntax
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
       - name: Build Release APK
         run: flutter build apk --release --no-tree-shake-icons
 
