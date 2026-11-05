@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -6,7 +6,6 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
-import 'package:flutter/services.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
 import 'package:http/http.dart' as http;
@@ -42,7 +41,7 @@ class UVMonitorApp extends StatelessWidget {
 }
 
 class GuvaCalibrationEngine {
-  static const List<double> mvThresholds = [
+  static const List<double> mvThresholds = <double>[
     50.0, 227.0, 318.0, 408.0, 503.0, 606.0,
     696.0, 795.0, 881.0, 976.0, 1079.0, 1170.0
   ];
@@ -59,8 +58,8 @@ class GuvaCalibrationEngine {
     if (mv < 50.0) return 0.0;
     if (mv >= 1170.0) return 11.0 + (mv - 1170.0) / 91.0;
     for (int i = 0; i < 11; i++) {
-      double vLow = mvThresholds[i];
-      double vHigh = mvThresholds[i + 1];
+      final double vLow = mvThresholds[i];
+      final double vHigh = mvThresholds[i + 1];
       if (mv >= vLow && mv <= vHigh) {
         return i + (mv - vLow) / (vHigh - vLow);
       }
@@ -131,7 +130,7 @@ class UVRecord {
         getMvByFilter(filterName));
   }
 
-  Map<String, dynamic> toJson() => {
+  Map<String, dynamic> toJson() => <String, dynamic>{
         'ts': timestamp.toIso8601String(),
         'raw': mvRaw,
         'ma': mvMa,
@@ -147,14 +146,15 @@ class UVRecord {
       };
 
   factory UVRecord.fromJson(Map<String, dynamic> json) {
-    double hyb = ((json['hyb'] ?? json['kal'] ?? json['mv'] ?? 0.0) as num).toDouble();
-    double raw = ((json['raw'] ?? hyb) as num).toDouble();
-    double uviCal = ((json['uvi_cal'] ??
+    final double hyb =
+        ((json['hyb'] ?? json['kal'] ?? json['mv'] ?? 0.0) as num).toDouble();
+    final double raw = ((json['raw'] ?? hyb) as num).toDouble();
+    final double uviCal = ((json['uvi_cal'] ??
             json['uv'] ??
             GuvaCalibrationEngine.calculateCalibratedUVI(hyb)) as num)
         .toDouble();
     return UVRecord(
-      timestamp: DateTime.parse(json['ts']),
+      timestamp: DateTime.parse(json['ts'].toString()),
       mvRaw: raw,
       mvMa: ((json['ma'] ?? hyb) as num).toDouble(),
       mvEma: ((json['ema'] ?? hyb) as num).toDouble(),
@@ -172,6 +172,36 @@ class UVRecord {
       rssi: ((json['rssi'] ?? 0) as num).toInt(),
     );
   }
+}
+
+class HourlyBucketStat {
+  final int hour;
+  final String timeSlot;
+  final double peakUvi;
+  final double avgMv;
+  final int count;
+  final String risk;
+
+  HourlyBucketStat({
+    required this.hour,
+    required this.timeSlot,
+    required this.peakUvi,
+    required this.avgMv,
+    required this.count,
+    required this.risk,
+  });
+}
+
+class GranularTelemetryRow {
+  final String time;
+  final String uvData;
+  final String voltage;
+
+  GranularTelemetryRow({
+    required this.time,
+    required this.uvData,
+    required this.voltage,
+  });
 }
 
 class UVMonitorScreen extends StatefulWidget {
@@ -192,11 +222,11 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
   bool _isMqttCloudConnected = false;
   bool _isSimulating = false;
   String _status = 'Tap Connect (Auto-syncs via HiveMQ Cloud & Local Wi-Fi)';
-  int _selectedPollSeconds = 5;
+  final int _selectedPollSeconds = 5;
 
   String _selectedFilter = 'Hybrid (Median+Kalman)';
   bool _overlayRawOnChart = true;
-  final List<String> _filterOptions = [
+  final List<String> _filterOptions = <String>[
     'Hybrid (Median+Kalman)',
     '1D Kalman Filter',
     'Median Filter',
@@ -205,7 +235,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     'Raw (No Filter)',
   ];
 
-  final List<double> _winBuf = [];
+  final List<double> _winBuf = <double>[];
   double _emaState = 0.0;
   double _kalX = 0.0, _kalP = 1.0;
   double _hybX = 0.0, _hybP = 1.0;
@@ -213,8 +243,8 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
   UVRecord? _latestRecord;
   int _packetCount = 0;
 
-  final List<UVRecord> _liveRecords = [];
-  List<UVRecord> _allHistoryRecords = [];
+  final List<UVRecord> _liveRecords = <UVRecord>[];
+  List<UVRecord> _allHistoryRecords = <UVRecord>[];
 
   String _periodMode = 'Date';
   int _selectedYear = DateTime.now().year;
@@ -223,7 +253,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
   int _selectedDay = DateTime.now().day;
   String _timeGranularity = 'Seconds';
 
-  static const List<String> _monthNames = [
+  static const List<String> _monthNames = <String>[
     'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
   ];
@@ -244,12 +274,13 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
   }
 
   Future<void> _loadSavedHistory() async {
-    final prefs = await SharedPreferences.getInstance();
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
     final List<String>? savedJson = prefs.getStringList('uv_history_logs_v3');
     if (savedJson != null) {
       setState(() {
         _allHistoryRecords = savedJson
-            .map((str) => UVRecord.fromJson(jsonDecode(str)))
+            .map((String str) =>
+                UVRecord.fromJson(jsonDecode(str) as Map<String, dynamic>))
             .toList();
       });
     }
@@ -260,14 +291,14 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     if (_allHistoryRecords.length > 8000) {
       _allHistoryRecords.removeAt(0);
     }
-    final prefs = await SharedPreferences.getInstance();
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
     final List<String> encoded =
-        _allHistoryRecords.map((r) => jsonEncode(r.toJson())).toList();
+        _allHistoryRecords.map((UVRecord r) => jsonEncode(r.toJson())).toList();
     await prefs.setStringList('uv_history_logs_v3', encoded);
   }
 
   Future<void> _connectHiveMqCloud() async {
-    final clientId = 'flutter_uv_${Random().nextInt(99999)}';
+    final String clientId = 'flutter_uv_${Random().nextInt(99999)}';
     _mqttClient = MqttServerClient.withPort('broker.hivemq.com', clientId, 1883);
     _mqttClient!.keepAlivePeriod = 30;
     _mqttClient!.autoReconnect = true;
@@ -284,8 +315,8 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
       await _mqttClient!.connect();
       _mqttClient!.updates?.listen((List<MqttReceivedMessage<MqttMessage>> c) {
         if (!_isConnected || _isSimulating) return;
-        final recMess = c[0].payload as MqttPublishMessage;
-        final payload =
+        final MqttPublishMessage recMess = c[0].payload as MqttPublishMessage;
+        final String payload =
             MqttPublishPayload.bytesToStringAsString(recMess.payload.message);
         _parseIncomingJson(payload, source: 'HiveMQ Cloud + Grafana Sync');
       });
@@ -315,10 +346,10 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
   }
 
   Future<void> _fetchLocalHttp() async {
-    final ip = _ipController.text.trim();
+    final String ip = _ipController.text.trim();
     if (ip.isEmpty) return;
     try {
-      final response = await http
+      final http.Response response = await http
           .get(Uri.parse('http://$ip/data'))
           .timeout(const Duration(milliseconds: 2200));
 
@@ -334,18 +365,19 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
 
   void _parseIncomingJson(String body, {required String source}) {
     try {
-      final data = jsonDecode(body);
-      double raw = double.tryParse(
+      final Map<String, dynamic> data =
+          jsonDecode(body) as Map<String, dynamic>;
+      final double raw = double.tryParse(
               (data['mv_raw'] ?? data['sensor_mv'] ?? '0').toString()) ??
           0.0;
-      int rssi = int.tryParse((data['rssi_dbm'] ?? '0').toString()) ?? 0;
+      final int rssi = int.tryParse((data['rssi_dbm'] ?? '0').toString()) ?? 0;
 
       if (data.containsKey('mv_hybrid')) {
-        double ma = double.tryParse(data['mv_ma'].toString()) ?? raw;
-        double ema = double.tryParse(data['mv_ema'].toString()) ?? raw;
-        double med = double.tryParse(data['mv_median'].toString()) ?? raw;
-        double kal = double.tryParse(data['mv_kalman'].toString()) ?? raw;
-        double hyb = double.tryParse(data['mv_hybrid'].toString()) ?? raw;
+        final double ma = double.tryParse(data['mv_ma'].toString()) ?? raw;
+        final double ema = double.tryParse(data['mv_ema'].toString()) ?? raw;
+        final double med = double.tryParse(data['mv_median'].toString()) ?? raw;
+        final double kal = double.tryParse(data['mv_kalman'].toString()) ?? raw;
+        final double hyb = double.tryParse(data['mv_hybrid'].toString()) ?? raw;
         _recordSample(raw, ma, ema, med, kal, hyb, rssi, source: source);
       } else {
         _compute6FiltersLocallyAndRecord(raw, rssi, source: source);
@@ -358,21 +390,22 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     _winBuf.add(raw);
     if (_winBuf.length > 9) _winBuf.removeAt(0);
 
-    double ma = _winBuf.reduce((a, b) => a + b) / _winBuf.length;
+    final double ma =
+        _winBuf.reduce((double a, double b) => a + b) / _winBuf.length;
     _emaState = _packetCount == 0 ? raw : (0.25 * raw) + (0.75 * _emaState);
 
-    List<double> sorted = List<double>.from(_winBuf)..sort();
-    double med = sorted[sorted.length ~/ 2];
+    final List<double> sorted = List<double>.from(_winBuf)..sort();
+    final double med = sorted[sorted.length ~/ 2];
 
     if (_packetCount == 0) _kalX = raw;
     _kalP += 0.05;
-    double kG = _kalP / (_kalP + 2.5);
+    final double kG = _kalP / (_kalP + 2.5);
     _kalX += kG * (raw - _kalX);
     _kalP = (1.0 - kG) * _kalP;
 
     if (_packetCount == 0) _hybX = med;
     _hybP += 0.05;
-    double hG = _hybP / (_hybP + 1.5);
+    final double hG = _hybP / (_hybP + 1.5);
     _hybX += hG * (med - _hybX);
     _hybP = (1.0 - hG) * _hybP;
 
@@ -396,7 +429,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     final int uviInt = GuvaCalibrationEngine.lookupDiscreteUVI(hyb);
     final String risk = GuvaCalibrationEngine.getRiskCategory(uviCal);
 
-    final rec = UVRecord(
+    final UVRecord rec = UVRecord(
       timestamp: DateTime.now(),
       mvRaw: raw,
       mvMa: ma,
@@ -440,40 +473,43 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
   }
 
   void _generateDemoPoint() {
-    final rng = Random();
-    double baseMv = 380.0 + sin(_packetCount * 0.2) * 260.0;
-    double whiteNoise = (rng.nextDouble() - 0.5) * 30.0;
-    double wifiSpike = (rng.nextInt(4) == 0) ? 165.0 : 0.0;
-    double raw = (baseMv + whiteNoise + wifiSpike).clamp(20.0, 1250.0);
+    final Random rng = Random();
+    final double baseMv = 380.0 + sin(_packetCount * 0.2) * 260.0;
+    final double whiteNoise = (rng.nextDouble() - 0.5) * 30.0;
+    final double wifiSpike = (rng.nextInt(4) == 0) ? 165.0 : 0.0;
+    final double raw = (baseMv + whiteNoise + wifiSpike).clamp(20.0, 1250.0);
     _compute6FiltersLocallyAndRecord(raw, -51,
         source: 'Demo Noise Filter Test');
   }
 
   double _calcFilterStdDev(String filterName) {
     if (_liveRecords.length < 3) return 0.0;
-    final vals = _liveRecords.map((r) => r.getMvByFilter(filterName)).toList();
-    List<double> diffs = [];
+    final List<double> vals =
+        _liveRecords.map((UVRecord r) => r.getMvByFilter(filterName)).toList();
+    final List<double> diffs = <double>[];
     for (int i = 1; i < vals.length; i++) {
       diffs.add(vals[i] - vals[i - 1]);
     }
-    final mean = diffs.reduce((a, b) => a + b) / diffs.length;
-    final variance =
-        diffs.map((d) => pow(d - mean, 2)).reduce((a, b) => a + b) /
-            diffs.length;
+    final double mean =
+        diffs.reduce((double a, double b) => a + b) / diffs.length;
+    final double variance = diffs
+            .map((double d) => pow(d - mean, 2).toDouble())
+            .reduce((double a, double b) => a + b) /
+        diffs.length;
     return sqrt(variance);
   }
 
   int _daysInMonth(int year, int month) => DateTime(year, month + 1, 0).day;
 
   List<UVRecord> _getFilteredRecords() {
-    return _allHistoryRecords.where((r) {
-      final ts = r.timestamp;
+    return _allHistoryRecords.where((UVRecord r) {
+      final DateTime ts = r.timestamp;
       if (_periodMode == 'Year') {
         return ts.year == _selectedYear;
       } else if (_periodMode == 'Month') {
         return ts.year == _selectedYear && ts.month == _selectedMonth;
       } else if (_periodMode == 'Week') {
-        int wk = ((ts.day - 1) ~/ 7) + 1;
+        final int wk = ((ts.day - 1) ~/ 7) + 1;
         return ts.year == _selectedYear &&
             ts.month == _selectedMonth &&
             wk == _selectedWeek;
@@ -485,54 +521,55 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     }).toList();
   }
 
-  List> _get24HrDescendingList() {
-    final dayRecords = _allHistoryRecords.where((r) =>
-        r.timestamp.year == _selectedYear &&
-        r.timestamp.month == _selectedMonth &&
-        r.timestamp.day == _selectedDay);
+  List<HourlyBucketStat> _get24HrDescendingList() {
+    final Iterable<UVRecord> dayRecords = _allHistoryRecords.where(
+        (UVRecord r) =>
+            r.timestamp.year == _selectedYear &&
+            r.timestamp.month == _selectedMonth &&
+            r.timestamp.day == _selectedDay);
 
-    final Map<int, List<UVRecord>> byHour = {
-      for (int h = 0; h < 24; h++) h: []
+    final Map<int, List<UVRecord>> byHour = <int, List<UVRecord>>{
+      for (int h = 0; h < 24; h++) h: <UVRecord>[]
     };
-    for (final r in dayRecords) {
+    for (final UVRecord r in dayRecords) {
       byHour[r.timestamp.hour]?.add(r);
     }
 
-    final List> list24 = [];
+    final List<HourlyBucketStat> list24 = <HourlyBucketStat>[];
     for (int h = 0; h < 24; h++) {
-      final items = byHour[h]!;
+      final List<UVRecord> items = byHour[h]!;
       double peakUvi = 0.0;
       double avgMv = 0.0;
       if (items.isNotEmpty) {
-        for (final item in items) {
-          double u = item.getUviByFilter(_selectedFilter);
+        for (final UVRecord item in items) {
+          final double u = item.getUviByFilter(_selectedFilter);
           if (u > peakUvi) peakUvi = u;
           avgMv += item.getMvByFilter(_selectedFilter);
         }
         avgMv /= items.length;
       }
-      list24.add({
-        'hour': h,
-        'timeSlot':
+      list24.add(HourlyBucketStat(
+        hour: h,
+        timeSlot:
             '${h.toString().padLeft(2, '0')}:00 - ${h.toString().padLeft(2, '0')}:59',
-        'peakUvi': peakUvi,
-        'avgMv': avgMv,
-        'count': items.length,
-        'risk': GuvaCalibrationEngine.getRiskCategory(peakUvi),
-      });
+        peakUvi: peakUvi,
+        avgMv: avgMv,
+        count: items.length,
+        risk: GuvaCalibrationEngine.getRiskCategory(peakUvi),
+      ));
     }
 
     list24.sort(
-        (a, b) => (b['peakUvi'] as double).compareTo(a['peakUvi'] as double));
+        (HourlyBucketStat a, HourlyBucketStat b) => b.peakUvi.compareTo(a.peakUvi));
     return list24;
   }
 
-  List> _getGranularityTableRows() {
-    final source = _getFilteredRecords();
-    if (source.isEmpty) return [];
+  List<GranularTelemetryRow> _getGranularityTableRows() {
+    final List<UVRecord> source = _getFilteredRecords();
+    if (source.isEmpty) return <GranularTelemetryRow>[];
 
-    final Map<String, List<UVRecord>> bucketed = {};
-    for (final r in source.reversed) {
+    final Map<String, List<UVRecord>> bucketed = <String, List<UVRecord>>{};
+    for (final UVRecord r in source.reversed) {
       String key;
       if (_timeGranularity == 'Seconds') {
         key = DateFormat('yyyy-MM-dd HH:mm:ss').format(r.timestamp);
@@ -543,49 +580,52 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
       } else {
         key = DateFormat('yyyy-MM-dd').format(r.timestamp);
       }
-      bucketed.putIfAbsent(key, () => []).add(r);
+      bucketed.putIfAbsent(key, () => <UVRecord>[]).add(r);
     }
 
-    return bucketed.entries.take(100).map((e) {
-      final recs = e.value;
-      final avgMv = recs
-              .map((r) => r.getMvByFilter(_selectedFilter))
-              .reduce((a, b) => a + b) /
+    return bucketed.entries.take(100).map((MapEntry<String, List<UVRecord>> e) {
+      final List<UVRecord> recs = e.value;
+      final double avgMv = recs
+              .map((UVRecord r) => r.getMvByFilter(_selectedFilter))
+              .reduce((double a, double b) => a + b) /
           recs.length;
-      final avgUvi = GuvaCalibrationEngine.calculateCalibratedUVI(avgMv);
-      return {
-        'time': e.key,
-        'uv_data': '${avgUvi.toStringAsFixed(2)} UVI (${GuvaCalibrationEngine.getRiskCategory(avgUvi)})',
-        'voltage': '${avgMv.toStringAsFixed(1)} mV',
-      };
+      final double avgUvi = GuvaCalibrationEngine.calculateCalibratedUVI(avgMv);
+      return GranularTelemetryRow(
+        time: e.key,
+        uvData:
+            '${avgUvi.toStringAsFixed(2)} UVI (${GuvaCalibrationEngine.getRiskCategory(avgUvi)})',
+        voltage: '${avgMv.toStringAsFixed(1)} mV',
+      );
     }).toList();
   }
 
   Future<void> _downloadGranularityCsv() async {
-    final rows = _getGranularityTableRows();
+    final List<GranularTelemetryRow> rows = _getGranularityTableRows();
     if (rows.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No data in current selection to download!')),
+        const SnackBar(
+            content: Text('No data in current selection to download!')),
       );
       return;
     }
 
     final StringBuffer csv = StringBuffer();
-    csv.writeln('Time ($_timeGranularity),UV_Index_Calibrated,Voltage_mV,Filter_Used');
-    for (final r in rows) {
-      csv.writeln('${r['time']},${r['uv_data']},${r['voltage']},$_selectedFilter');
+    csv.writeln(
+        'Time ($_timeGranularity),UV_Index_Calibrated,Voltage_mV,Filter_Used');
+    for (final GranularTelemetryRow r in rows) {
+      csv.writeln('${r.time},${r.uvData},${r.voltage},$_selectedFilter');
     }
 
-    final dir = await getTemporaryDirectory();
-    final file = File(
+    final Directory dir = await getTemporaryDirectory();
+    final File file = File(
         '${dir.path}/uv_${_timeGranularity.toLowerCase()}_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv');
     await file.writeAsString(csv.toString());
-    await Share.shareXFiles([XFile(file.path)],
+    await Share.shareXFiles(<XFile>[XFile(file.path)],
         text: 'UV Sensor Data ($_timeGranularity Granularity)');
   }
 
   Future<void> _download6FilterComparisonCsv() async {
-    final list = _getFilteredRecords().isNotEmpty
+    final List<UVRecord> list = _getFilteredRecords().isNotEmpty
         ? _getFilteredRecords()
         : _allHistoryRecords;
     if (list.isEmpty) return;
@@ -594,8 +634,8 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     csv.writeln(
         'Timestamp,Raw_mV,MovingAvg_mV,EMA_mV,Median_mV,Kalman_mV,Hybrid_MedKal_mV,UVI_Calibrated,UVI_Lookup_Int,UVI_Linear_Old,Risk_Category');
 
-    final df = DateFormat('yyyy-MM-dd HH:mm:ss');
-    for (final r in list) {
+    final DateFormat df = DateFormat('yyyy-MM-dd HH:mm:ss');
+    for (final UVRecord r in list) {
       csv.writeln(
         '${df.format(r.timestamp)},'
         '${r.mvRaw.toStringAsFixed(2)},'
@@ -611,29 +651,29 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
       );
     }
 
-    final dir = await getTemporaryDirectory();
-    final file = File(
+    final Directory dir = await getTemporaryDirectory();
+    final File file = File(
         '${dir.path}/uv_6filter_comparison_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv');
     await file.writeAsString(csv.toString());
-    await Share.shareXFiles([XFile(file.path)],
+    await Share.shareXFiles(<XFile>[XFile(file.path)],
         text: '6-Filter UV Comparison Dataset');
   }
 
   Future<void> _downloadGraphPng() async {
     try {
-      RenderRepaintBoundary? boundary = _chartBoundaryKey.currentContext
+      final RenderRepaintBoundary? boundary = _chartBoundaryKey.currentContext
           ?.findRenderObject() as RenderRepaintBoundary?;
       if (boundary == null) return;
-      ui.Image image = await boundary.toImage(pixelRatio: 3.0);
-      ByteData? byteData =
+      final ui.Image image = await boundary.toImage(pixelRatio: 3.0);
+      final ByteData? byteData =
           await image.toByteData(format: ui.ImageByteFormat.png);
       if (byteData == null) return;
 
-      final dir = await getTemporaryDirectory();
-      final file = File(
+      final Directory dir = await getTemporaryDirectory();
+      final File file = File(
           '${dir.path}/uv_graph_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.png');
       await file.writeAsBytes(byteData.buffer.asUint8List());
-      await Share.shareXFiles([XFile(file.path)],
+      await Share.shareXFiles(<XFile>[XFile(file.path)],
           text: 'UV Sensor Graph Image ($_selectedFilter)');
     } catch (e) {
       if (!mounted) return;
@@ -643,42 +683,45 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
   }
 
   Future<void> _showPhoneStyleWiFiDialog() async {
-    final ssidCtrl = TextEditingController();
-    final passCtrl = TextEditingController();
-    final influxUrlCtrl = TextEditingController();
-    final influxTokCtrl = TextEditingController();
-    List<dynamic> scannedNetworks = [];
+    final TextEditingController ssidCtrl = TextEditingController();
+    final TextEditingController passCtrl = TextEditingController();
+    final TextEditingController influxUrlCtrl = TextEditingController();
+    final TextEditingController influxTokCtrl = TextEditingController();
+    List<dynamic> scannedNetworks = <dynamic>[];
     bool scanning = true;
 
-    showDialog(
+    await showDialog<void>(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) {
+      builder: (BuildContext ctx) => StatefulBuilder(
+        builder: (BuildContext ctx, StateSetter setDialogState) {
           if (scanning) {
             scanning = false;
-            final ip = _ipController.text.trim();
+            final String ip = _ipController.text.trim();
             http
                 .get(Uri.parse('http://$ip/scan'))
                 .timeout(const Duration(seconds: 4))
-                .then((res) {
+                .then((http.Response res) {
               if (res.statusCode == 200) {
-                final data = jsonDecode(res.body);
+                final Map<String, dynamic> data =
+                    jsonDecode(res.body) as Map<String, dynamic>;
                 setDialogState(() {
-                  scannedNetworks = data['networks'] ?? [];
+                  scannedNetworks =
+                      (data['networks'] as List<dynamic>?) ?? <dynamic>[];
                 });
               }
-            }).catchError((_) {});
+            }).catchError((Object _) {});
           }
 
           return AlertDialog(
             backgroundColor: const Color(0xFF151F32),
             title: const Row(
-              children: [
+              children: <Widget>[
                 Icon(Icons.wifi_rounded, color: Color(0xFF00F5D4)),
                 SizedBox(width: 8),
                 Expanded(
                   child: Text('Connect ESP32 to Any Wi-Fi & Cloud',
-                      style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                      style:
+                          TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
                 ),
               ],
             ),
@@ -686,18 +729,20 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (scannedNetworks.isNotEmpty) ...[
+                children: <Widget>[
+                  if (scannedNetworks.isNotEmpty) ...<Widget>[
                     const Text('Tap an Available Network Found by ESP32:',
-                        style: TextStyle(fontSize: 11, color: Color(0xFF00F5D4))),
+                        style:
+                            TextStyle(fontSize: 11, color: Color(0xFF00F5D4))),
                     const SizedBox(height: 6),
                     SizedBox(
                       height: 110,
                       width: double.maxFinite,
                       child: ListView.builder(
                         itemCount: scannedNetworks.length,
-                        itemBuilder: (_, i) {
-                          final net = scannedNetworks[i];
+                        itemBuilder: (BuildContext _, int i) {
+                          final Map<String, dynamic> net =
+                              scannedNetworks[i] as Map<String, dynamic>;
                           return ListTile(
                             dense: true,
                             contentPadding: EdgeInsets.zero,
@@ -761,7 +806,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                 ],
               ),
             ),
-            actions: [
+            actions: <Widget>[
               TextButton(
                 onPressed: () => Navigator.pop(ctx),
                 child: const Text('Cancel'),
@@ -772,33 +817,32 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                   foregroundColor: Colors.black,
                 ),
                 onPressed: () async {
-                  final ip = _ipController.text.trim();
+                  final String ip = _ipController.text.trim();
+                  final NavigatorState nav = Navigator.of(ctx);
+                  final ScaffoldMessengerState messenger =
+                      ScaffoldMessenger.of(context);
                   try {
                     await http.post(
                       Uri.parse('http://$ip/wifi'),
-                      body: {
+                      body: <String, String>{
                         'ssid': ssidCtrl.text.trim(),
                         'pass': passCtrl.text,
                         'influx_url': influxUrlCtrl.text.trim(),
                         'influx_token': influxTokCtrl.text.trim(),
                       },
                     );
-                    if (mounted) {
-                      Navigator.pop(ctx);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                            content: Text(
-                                'Saved! ESP32 is connecting to the new Wi-Fi & syncing via HiveMQ Cloud.')),
-                      );
-                    }
+                    nav.pop();
+                    messenger.showSnackBar(
+                      const SnackBar(
+                          content: Text(
+                              'Saved! ESP32 is connecting to the new Wi-Fi & syncing via HiveMQ Cloud.')),
+                    );
                   } catch (e) {
-                    if (mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                            content: Text(
-                                'Tip: If switching away from old Wi-Fi, connect phone to "ESP32_UV_WiFi_Setup" AP (IP 192.168.4.1) first.')),
-                      );
-                    }
+                    messenger.showSnackBar(
+                      const SnackBar(
+                          content: Text(
+                              'Tip: If switching away from old Wi-Fi, connect phone to "ESP32_UV_WiFi_Setup" AP (IP 192.168.4.1) first.')),
+                    );
                   }
                 },
                 child: const Text('Connect ESP32'),
@@ -830,11 +874,11 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     final String activeRisk = GuvaCalibrationEngine.getRiskCategory(activeUvi);
     final Color activeColor = _getRiskColor(activeUvi);
 
-    final hourlyRanked = _get24HrDescendingList();
-    final granularRows = _getGranularityTableRows();
+    final List<HourlyBucketStat> hourlyRanked = _get24HrDescendingList();
+    final List<GranularTelemetryRow> granularRows = _getGranularityTableRows();
     final int currentYear = DateTime.now().year;
     final List<int> yearOptions =
-        List.generate((currentYear - 2020) + 1, (i) => 2020 + i);
+        List<int>.generate((currentYear - 2020) + 1, (int i) => 2020 + i);
     final int maxDays = _daysInMonth(_selectedYear, _selectedMonth);
     if (_selectedDay > maxDays) _selectedDay = maxDays;
 
@@ -845,7 +889,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
           'UV Calibration, Filter Lab & Cloud Hub',
           style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15),
         ),
-        actions: [
+        actions: <Widget>[
           IconButton(
             tooltip: 'Connect ESP32 to Any Wi-Fi / Hotspot',
             icon: const Icon(Icons.wifi_password_rounded,
@@ -873,7 +917,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
           padding: const EdgeInsets.all(12.0),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
+            children: <Widget>[
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
@@ -882,9 +926,9 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                   border: Border.all(color: Colors.white10),
                 ),
                 child: Column(
-                  children: [
+                  children: <Widget>[
                     Row(
-                      children: [
+                      children: <Widget>[
                         Expanded(
                           child: TextField(
                             controller: _ipController,
@@ -893,7 +937,8 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                                 fontWeight: FontWeight.bold,
                                 fontSize: 13),
                             decoration: InputDecoration(
-                              labelText: 'ESP32 Local IP (or 192.168.4.1 Setup)',
+                              labelText:
+                                  'ESP32 Local IP (or 192.168.4.1 Setup)',
                               prefixIcon: const Icon(Icons.router_rounded,
                                   color: Color(0xFF00F5D4), size: 18),
                               filled: true,
@@ -928,7 +973,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                     const SizedBox(height: 8),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
+                      children: <Widget>[
                         Expanded(
                           child: Text(_status,
                               style: const TextStyle(
@@ -962,7 +1007,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                     ),
                     const Divider(color: Colors.white12, height: 16),
                     Row(
-                      children: [
+                      children: <Widget>[
                         const Icon(Icons.tune_rounded,
                             color: Color(0xFFFEE440), size: 18),
                         const SizedBox(width: 6),
@@ -977,7 +1022,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                               isExpanded: true,
                               dropdownColor: const Color(0xFF1E293B),
                               items: _filterOptions
-                                  .map((f) => DropdownMenuItem(
+                                  .map((String f) => DropdownMenuItem<String>(
                                         value: f,
                                         child: Text(f,
                                             style: const TextStyle(
@@ -986,7 +1031,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                                                 fontWeight: FontWeight.bold)),
                                       ))
                                   .toList(),
-                              onChanged: (val) {
+                              onChanged: (String? val) {
                                 if (val != null) {
                                   setState(() => _selectedFilter = val);
                                 }
@@ -997,7 +1042,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                         Checkbox(
                           value: _overlayRawOnChart,
                           activeColor: const Color(0xFFFF0055),
-                          onChanged: (v) =>
+                          onChanged: (bool? v) =>
                               setState(() => _overlayRawOnChart = v ?? true),
                         ),
                         const Text('vs Raw', style: TextStyle(fontSize: 11)),
@@ -1008,12 +1053,13 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
               ),
               const SizedBox(height: 12),
               Row(
-                children: [
+                children: <Widget>[
                   Expanded(
                     child: _metricCard(
                       title: 'Filtered Voltage',
                       value: '${activeMv.toStringAsFixed(1)} mV',
-                      sub: 'Raw: ${(_latestRecord?.mvRaw ?? 0).toStringAsFixed(1)} mV',
+                      sub:
+                          'Raw: ${(_latestRecord?.mvRaw ?? 0).toStringAsFixed(1)} mV',
                       accent: const Color(0xFF00BBF9),
                     ),
                   ),
@@ -1047,7 +1093,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
+                  children: <Widget>[
                     const Text(
                       'Live Filter Noise Jitter Comparison (Lower σ = Cleaner Signal):',
                       style: TextStyle(
@@ -1059,11 +1105,11 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                     SingleChildScrollView(
                       scrollDirection: Axis.horizontal,
                       child: Row(
-                        children: _filterOptions.map((fName) {
-                          final sigma = _calcFilterStdDev(fName);
-                          final val =
+                        children: _filterOptions.map((String fName) {
+                          final double sigma = _calcFilterStdDev(fName);
+                          final double val =
                               _latestRecord?.getMvByFilter(fName) ?? 0.0;
-                          final isSelected = _selectedFilter == fName;
+                          final bool isSelected = _selectedFilter == fName;
                           return Container(
                             margin: const EdgeInsets.only(right: 8),
                             padding: const EdgeInsets.symmetric(
@@ -1081,7 +1127,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                             ),
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
+                              children: <Widget>[
                                 Text(fName,
                                     style: const TextStyle(
                                         fontSize: 10,
@@ -1103,7 +1149,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
               const SizedBox(height: 14),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
+                children: <Widget>[
                   const Text(
                     'Live UV Index Graph (Filtered vs Unfiltered)',
                     style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800),
@@ -1141,7 +1187,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                             gridData: FlGridData(
                               show: true,
                               drawVerticalLine: false,
-                              getDrawingHorizontalLine: (v) => FlLine(
+                              getDrawingHorizontalLine: (double v) => FlLine(
                                   color: Colors.white.withOpacity(0.06),
                                   strokeWidth: 1),
                             ),
@@ -1159,8 +1205,9 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                                       ? (_liveRecords.length / 4)
                                           .floorToDouble()
                                       : 1,
-                                  getTitlesWidget: (val, meta) {
-                                    final idx = val.toInt();
+                                  getTitlesWidget:
+                                      (double val, TitleMeta meta) {
+                                    final int idx = val.toInt();
                                     if (idx >= 0 && idx < _liveRecords.length) {
                                       return Padding(
                                         padding:
@@ -1179,13 +1226,13 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                                 ),
                               ),
                             ),
-                            lineBarsData: [
+                            lineBarsData: <LineChartBarData>[
                               if (_overlayRawOnChart)
                                 LineChartBarData(
                                   spots: _liveRecords
                                       .asMap()
                                       .entries
-                                      .map((e) => FlSpot(
+                                      .map((MapEntry<int, UVRecord> e) => FlSpot(
                                           e.key.toDouble(),
                                           GuvaCalibrationEngine
                                               .calculateCalibratedUVI(
@@ -1195,14 +1242,14 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                                   color:
                                       const Color(0xFFFF0055).withOpacity(0.55),
                                   barWidth: 1.5,
-                                  dashArray: [4, 4],
+                                  dashArray: <int>[4, 4],
                                   dotData: const FlDotData(show: false),
                                 ),
                               LineChartBarData(
                                 spots: _liveRecords
                                     .asMap()
                                     .entries
-                                    .map((e) => FlSpot(
+                                    .map((MapEntry<int, UVRecord> e) => FlSpot(
                                         e.key.toDouble(),
                                         e.value
                                             .getUviByFilter(_selectedFilter)))
@@ -1227,7 +1274,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
+                  children: <Widget>[
                     const Text(
                       'Select Filter Period (Date / Week 1–5 / Month Jan–Dec / Year 2020–Present)',
                       style:
@@ -1235,8 +1282,9 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                     ),
                     const SizedBox(height: 8),
                     Row(
-                      children: ['Date', 'Week', 'Month', 'Year'].map((mode) {
-                        final selected = _periodMode == mode;
+                      children: <String>['Date', 'Week', 'Month', 'Year']
+                          .map((String mode) {
+                        final bool selected = _periodMode == mode;
                         return Expanded(
                           child: Padding(
                             padding:
@@ -1259,7 +1307,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                               selected: selected,
                               selectedColor: const Color(0xFF00F5D4),
                               backgroundColor: const Color(0xFF0B0F19),
-                              onSelected: (_) =>
+                              onSelected: (bool _) =>
                                   setState(() => _periodMode = mode),
                             ),
                           ),
@@ -1270,58 +1318,58 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                     Wrap(
                       spacing: 8,
                       runSpacing: 8,
-                      children: [
+                      children: <Widget>[
                         _buildDropdownChip<int>(
                           label: 'Year',
                           value: _selectedYear,
                           items: yearOptions
-                              .map((y) => DropdownMenuItem(
+                              .map((int y) => DropdownMenuItem<int>(
                                   value: y, child: Text('$y')))
                               .toList(),
-                          onChanged: (val) => setState(
+                          onChanged: (int? val) => setState(
                               () => _selectedYear = val ?? currentYear),
                         ),
                         if (_periodMode != 'Year')
                           _buildDropdownChip<int>(
                             label: 'Month',
                             value: _selectedMonth,
-                            items: List.generate(
+                            items: List<DropdownMenuItem<int>>.generate(
                               12,
-                              (i) => DropdownMenuItem(
+                              (int i) => DropdownMenuItem<int>(
                                 value: i + 1,
                                 child: Text(_monthNames[i]),
                               ),
                             ),
-                            onChanged: (val) =>
+                            onChanged: (int? val) =>
                                 setState(() => _selectedMonth = val ?? 1),
                           ),
                         if (_periodMode == 'Week')
                           _buildDropdownChip<int>(
                             label: 'Week',
                             value: _selectedWeek,
-                            items: List.generate(
+                            items: List<DropdownMenuItem<int>>.generate(
                               5,
-                              (i) => DropdownMenuItem(
+                              (int i) => DropdownMenuItem<int>(
                                 value: i + 1,
                                 child: Text('Week ${i + 1}'),
                               ),
                             ),
-                            onChanged: (val) =>
+                            onChanged: (int? val) =>
                                 setState(() => _selectedWeek = val ?? 1),
                           ),
                         if (_periodMode == 'Date')
                           _buildDropdownChip<int>(
                             label: 'Date',
                             value: _selectedDay,
-                            items: List.generate(
+                            items: List<DropdownMenuItem<int>>.generate(
                               maxDays,
-                              (i) => DropdownMenuItem(
+                              (int i) => DropdownMenuItem<int>(
                                 value: i + 1,
                                 child: Text(
                                     '${i + 1} ${_monthNames[_selectedMonth - 1]}'),
                               ),
                             ),
-                            onChanged: (val) =>
+                            onChanged: (int? val) =>
                                 setState(() => _selectedDay = val ?? 1),
                           ),
                       ],
@@ -1350,9 +1398,9 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                 ),
                 child: ListView.builder(
                   itemCount: hourlyRanked.length,
-                  itemBuilder: (ctx, idx) {
-                    final hr = hourlyRanked[idx];
-                    final double peakUvi = hr['peakUvi'] as double;
+                  itemBuilder: (BuildContext ctx, int idx) {
+                    final HourlyBucketStat hr = hourlyRanked[idx];
+                    final double peakUvi = hr.peakUvi;
                     final bool isHighestHour = idx == 0 && peakUvi > 0;
 
                     return Container(
@@ -1372,20 +1420,20 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                           width: isHighestHour ? 2.0 : 0.8,
                         ),
                         boxShadow: isHighestHour
-                            ? [
+                            ? <BoxShadow>[
                                 BoxShadow(
                                   color:
                                       const Color(0xFFFF0055).withOpacity(0.25),
                                   blurRadius: 8,
                                 )
                               ]
-                            : [],
+                            : <BoxShadow>[],
                       ),
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
+                        children: <Widget>[
                           Row(
-                            children: [
+                            children: <Widget>[
                               Container(
                                 padding: const EdgeInsets.symmetric(
                                     horizontal: 7, vertical: 3),
@@ -1410,7 +1458,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                               ),
                               const SizedBox(width: 10),
                               Text(
-                                hr['timeSlot'] as String,
+                                hr.timeSlot,
                                 style: TextStyle(
                                   fontWeight: isHighestHour
                                       ? FontWeight.w900
@@ -1421,7 +1469,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                             ],
                           ),
                           Text(
-                            'UVI: ${peakUvi.toStringAsFixed(2)} | ${(hr['avgMv'] as double).toStringAsFixed(1)} mV',
+                            'UVI: ${peakUvi.toStringAsFixed(2)} | ${hr.avgMv.toStringAsFixed(1)} mV',
                             style: TextStyle(
                               fontSize: 11,
                               fontWeight: FontWeight.bold,
@@ -1437,7 +1485,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
               const SizedBox(height: 16),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
+                children: <Widget>[
                   const Text(
                     'Telemetry Data (Time, UV Data, Voltage)',
                     style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800),
@@ -1453,8 +1501,8 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                       child: DropdownButton<String>(
                         value: _timeGranularity,
                         dropdownColor: const Color(0xFF1E293B),
-                        items: ['Seconds', 'Minutes', 'Hours', 'Day']
-                            .map((unit) => DropdownMenuItem(
+                        items: <String>['Seconds', 'Minutes', 'Hours', 'Day']
+                            .map((String unit) => DropdownMenuItem<String>(
                                   value: unit,
                                   child: Text(unit,
                                       style: const TextStyle(
@@ -1463,7 +1511,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                                           fontWeight: FontWeight.bold)),
                                 ))
                             .toList(),
-                        onChanged: (v) {
+                        onChanged: (String? v) {
                           if (v != null) setState(() => _timeGranularity = v);
                         },
                       ),
@@ -1491,23 +1539,24 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                         scrollDirection: Axis.vertical,
                         child: DataTable(
                           columnSpacing: 16,
-                          columns: const [
+                          columns: const <DataColumn>[
                             DataColumn(label: Text('Time')),
                             DataColumn(label: Text('UV Data')),
                             DataColumn(label: Text('Voltage')),
                           ],
-                          rows: granularRows.map((row) {
-                            return DataRow(cells: [
-                              DataCell(Text(row['time']!,
+                          rows: granularRows.map((GranularTelemetryRow row) {
+                            return DataRow(cells: <DataCell>[
+                              DataCell(Text(row.time,
                                   style: const TextStyle(fontSize: 11))),
-                              DataCell(Text(row['uv_data']!,
+                              DataCell(Text(row.uvData,
                                   style: const TextStyle(
                                       fontSize: 11,
                                       fontWeight: FontWeight.bold,
                                       color: Color(0xFF00F5D4)))),
-                              DataCell(Text(row['voltage']!,
+                              DataCell(Text(row.voltage,
                                   style: const TextStyle(
-                                      fontSize: 11, color: Colors.amberAccent))),
+                                      fontSize: 11,
+                                      color: Colors.amberAccent))),
                             ]);
                           }).toList(),
                         ),
@@ -1515,7 +1564,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
               ),
               const SizedBox(height: 14),
               Row(
-                children: [
+                children: <Widget>[
                   Expanded(
                     child: ElevatedButton.icon(
                       style: ElevatedButton.styleFrom(
@@ -1574,7 +1623,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
+        children: <Widget>[
           Text(title,
               style: const TextStyle(color: Colors.white60, fontSize: 10)),
           const SizedBox(height: 4),
@@ -1604,7 +1653,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
-        children: [
+        children: <Widget>[
           Text('$label: ',
               style: const TextStyle(color: Colors.white60, fontSize: 11)),
           DropdownButtonHideUnderline(
