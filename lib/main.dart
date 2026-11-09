@@ -40,6 +40,7 @@ class UVMonitorApp extends StatelessWidget {
   }
 }
 
+// ================= PIECEWISE CALIBRATION ENGINE (TASK 1) =================
 class GuvaCalibrationEngine {
   static const List<double> mvThresholds = <double>[
     50.0, 227.0, 318.0, 408.0, 503.0, 606.0,
@@ -78,6 +79,7 @@ class GuvaCalibrationEngine {
   }
 }
 
+// ================= TELEMETRY RECORD MODEL (3 FILTERS) =================
 class UVRecord {
   final DateTime timestamp;
   final double mvRaw;
@@ -142,7 +144,7 @@ class UVRecord {
             GuvaCalibrationEngine.calculateCalibratedUVI(hyb)) as num)
         .toDouble();
     return UVRecord(
-      timestamp: DateTime.parse(json['ts'].toString()),
+      timestamp: DateTime.parse(json['ts'].toString()).toLocal(),
       mvRaw: raw,
       mvMedian: ((json['med'] ?? hyb) as num).toDouble(),
       mvKalman: ((json['kal'] ?? hyb) as num).toDouble(),
@@ -202,14 +204,29 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
       TextEditingController(text: '192.168.0.117');
   final GlobalKey _chartBoundaryKey = GlobalKey();
 
-  Timer? _pollTimer;
-  MqttServerClient? _mqttClient;
-  bool _isConnected = false;
-  bool _isMqttCloudConnected = false;
-  bool _isSimulating = false;
-  String _status = 'Tap Connect (Auto-syncs via HiveMQ Cloud & Local Wi-Fi)';
-  final int _selectedPollSeconds = 5;
+  // ================= INFLUXDB CLOUD & HIVEMQ CONFIG =================
+  static const String _influxBaseUrl =
+      'https://us-east-1-1.aws.cloud2.influxdata.com';
+  static const String _influxOrg = 'IOT';
+  static const String _influxBucket = 'uv_sensor_data';
+  static const String _influxToken =
+      'Dbzt7IHP3G4E4McgOmsRBrZLUaK2fsEgexNVFzYSQI1V2PhqWbL6SFhB64Vg-jOY6HQIu7BibH8jkSQvHqLNWw==';
 
+  static const String _mqttBroker = 'broker.hivemq.com';
+  static const String _mqttTopic = 'venkat_iot/sensors/uv/node_01';
+
+  Timer? _pollTimer;
+  Timer? _influxSyncTimer;
+  MqttServerClient? _mqttClient;
+
+  bool _isConnected = true;
+  bool _isMqttCloudConnected = false;
+  bool _isInfluxCloudConnected = false;
+  bool _isSimulating = false;
+  String _status = 'Auto-connecting to HiveMQ & InfluxDB Cloud...';
+  final int _selectedPollSeconds = 3;
+
+  // ================= 3-FILTER SELECTION =================
   String _selectedFilter = 'Hybrid (Median+Kalman)';
   bool _overlayRawOnChart = true;
   final List<String> _filterOptions = <String>[
@@ -218,6 +235,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     'Median Filter',
   ];
 
+  // Fallback local DSP state
   final List<double> _winBuf = <double>[];
   double _kalX = 0.0, _kalP = 1.0;
   double _hybX = 0.0, _hybP = 1.0;
@@ -228,12 +246,13 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
   final List<UVRecord> _liveRecords = <UVRecord>[];
   List<UVRecord> _allHistoryRecords = <UVRecord>[];
 
-  String _periodMode = 'Date';
+  // ================= PERIOD & GRANULARITY DROPDOWN STATE =================
+  String _periodMode = 'Date'; // Date, Week, Month, Year
   int _selectedYear = DateTime.now().year;
   int _selectedMonth = DateTime.now().month;
   int _selectedWeek = ((DateTime.now().day - 1) ~/ 7) + 1;
   int _selectedDay = DateTime.now().day;
-  String _timeGranularity = 'Seconds';
+  String _timeGranularity = 'Seconds'; // Seconds, Minutes, Hours, Day
 
   static const List<String> _monthNames = <String>[
     'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
@@ -244,50 +263,93 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
   void initState() {
     super.initState();
     _loadSavedHistory();
-    _connectHiveMqCloud();
+    _startAlwaysOnSync();
   }
 
   @override
   void dispose() {
     _pollTimer?.cancel();
+    _influxSyncTimer?.cancel();
     _mqttClient?.disconnect();
     _ipController.dispose();
     super.dispose();
   }
 
+  void _startAlwaysOnSync() {
+    _connectHiveMqCloud();
+    _syncFromInfluxDbCloud();
+    _fetchLocalHttp();
+
+    _pollTimer?.cancel();
+    _pollTimer = Timer.periodic(
+      Duration(seconds: _selectedPollSeconds),
+      (_) {
+        if (_isConnected && !_isSimulating) {
+          _fetchLocalHttp();
+        }
+      },
+    );
+
+    _influxSyncTimer?.cancel();
+    _influxSyncTimer = Timer.periodic(
+      const Duration(seconds: 6),
+      (_) {
+        if (_isConnected && !_isSimulating) {
+          _syncFromInfluxDbCloud();
+        }
+      },
+    );
+  }
+
   Future<void> _loadSavedHistory() async {
     final SharedPreferences prefs = await SharedPreferences.getInstance();
-    final List<String>? savedJson = prefs.getStringList('uv_history_logs_v3');
-    if (savedJson != null) {
+    final List<String>? savedJson = prefs.getStringList('uv_history_logs_v4');
+    if (savedJson != null && savedJson.isNotEmpty) {
+      final List<UVRecord> loaded = savedJson
+          .map((String str) =>
+              UVRecord.fromJson(jsonDecode(str) as Map<String, dynamic>))
+          .toList();
+      if (!mounted) return;
       setState(() {
-        _allHistoryRecords = savedJson
-            .map((String str) =>
-                UVRecord.fromJson(jsonDecode(str) as Map<String, dynamic>))
-            .toList();
+        _allHistoryRecords = loaded;
+        _liveRecords
+          ..clear()
+          ..addAll(loaded.length > 60
+              ? loaded.sublist(loaded.length - 60)
+              : loaded);
+        _latestRecord = loaded.last;
       });
     }
   }
 
   Future<void> _saveRecordToHistory(UVRecord record) async {
-    _allHistoryRecords.add(record);
-    if (_allHistoryRecords.length > 8000) {
-      _allHistoryRecords.removeAt(0);
+    // Deduplicate timestamps within 1 second
+    final bool exists = _allHistoryRecords.any((UVRecord r) =>
+        (r.timestamp.difference(record.timestamp).inSeconds).abs() < 1);
+    if (!exists) {
+      _allHistoryRecords.add(record);
+      _allHistoryRecords.sort(
+          (UVRecord a, UVRecord b) => a.timestamp.compareTo(b.timestamp));
+      if (_allHistoryRecords.length > 8000) {
+        _allHistoryRecords.removeRange(0, _allHistoryRecords.length - 8000);
+      }
+      final SharedPreferences prefs = await SharedPreferences.getInstance();
+      final List<String> encoded = _allHistoryRecords
+          .map((UVRecord r) => jsonEncode(r.toJson()))
+          .toList();
+      await prefs.setStringList('uv_history_logs_v4', encoded);
     }
-    final SharedPreferences prefs = await SharedPreferences.getInstance();
-    final List<String> encoded =
-        _allHistoryRecords.map((UVRecord r) => jsonEncode(r.toJson())).toList();
-    await prefs.setStringList('uv_history_logs_v3', encoded);
   }
 
+  // ================= HIVEMQ CLOUD MQTT STREAM =================
   Future<void> _connectHiveMqCloud() async {
-    final String clientId = 'flutter_uv_${Random().nextInt(99999)}';
-    _mqttClient = MqttServerClient.withPort('broker.hivemq.com', clientId, 1883);
+    final String clientId = 'flutter_uv_${Random().nextInt(999999)}';
+    _mqttClient = MqttServerClient.withPort(_mqttBroker, clientId, 1883);
     _mqttClient!.keepAlivePeriod = 30;
     _mqttClient!.autoReconnect = true;
     _mqttClient!.onConnected = () {
       if (mounted) setState(() => _isMqttCloudConnected = true);
-      _mqttClient!.subscribe(
-          'venkat_iot/sensors/uv/node_01', MqttQos.atMostOnce);
+      _mqttClient!.subscribe(_mqttTopic, MqttQos.atMostOnce);
     };
     _mqttClient!.onDisconnected = () {
       if (mounted) setState(() => _isMqttCloudConnected = false);
@@ -307,22 +369,133 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     }
   }
 
+  // ================= INFLUXDB CLOUD DATABASE SYNC =================
+  Future<void> _syncFromInfluxDbCloud() async {
+    try {
+      const String fluxQuery = '''
+from(bucket: "$_influxBucket")
+  |> range(start: -24h)
+  |> filter(fn: (r) => r["_measurement"] == "uv_measurement")
+  |> filter(fn: (r) => r["_field"] == "voltage_raw_mv" or r["_field"] == "voltage_median_mv" or r["_field"] == "voltage_kalman_mv" or r["_field"] == "voltage_hybrid_mv" or r["_field"] == "uv_index_estimated")
+  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> sort(columns: ["_time"], desc: false)
+  |> tail(n: 120)
+''';
+
+      final Uri uri =
+          Uri.parse('$_influxBaseUrl/api/v2/query?org=$_influxOrg');
+      final http.Response response = await http
+          .post(
+            uri,
+            headers: <String, String>{
+              'Authorization': 'Token $_influxToken',
+              'Content-Type': 'application/vnd.flux',
+              'Accept': 'application/csv',
+            },
+            body: fluxQuery,
+          )
+          .timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200 && response.body.trim().isNotEmpty) {
+        if (mounted) setState(() => _isInfluxCloudConnected = true);
+        _parseInfluxCsvResponse(response.body);
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isInfluxCloudConnected = false);
+    }
+  }
+
+  void _parseInfluxCsvResponse(String csvBody) {
+    final List<String> lines = const LineSplitter().convert(csvBody);
+    if (lines.length < 2) return;
+
+    List<String>? headers;
+    int newPointsAdded = 0;
+    UVRecord? newestFromDb;
+
+    for (final String rawLine in lines) {
+      final String line = rawLine.trim();
+      if (line.isEmpty || line.startsWith('#')) continue;
+
+      final List<String> cols = line.split(',');
+      if (cols.contains('_time') && cols.contains('voltage_hybrid_mv')) {
+        headers = cols;
+        continue;
+      }
+      if (headers == null || cols.length < headers.length) continue;
+
+      final Map<String, String> rowMap = <String, String>{};
+      for (int i = 0; i < headers.length; i++) {
+        rowMap[headers[i]] = cols[i];
+      }
+
+      final DateTime? ts = DateTime.tryParse(rowMap['_time'] ?? '')?.toLocal();
+      if (ts == null) continue;
+
+      final double raw =
+          double.tryParse(rowMap['voltage_raw_mv'] ?? '') ?? 0.0;
+      final double med =
+          double.tryParse(rowMap['voltage_median_mv'] ?? '') ?? raw;
+      final double kal =
+          double.tryParse(rowMap['voltage_kalman_mv'] ?? '') ?? raw;
+      final double hyb =
+          double.tryParse(rowMap['voltage_hybrid_mv'] ?? '') ?? raw;
+      final double uviEst = double.tryParse(rowMap['uv_index_estimated'] ?? '') ??
+          GuvaCalibrationEngine.calculateCalibratedUVI(hyb);
+
+      final UVRecord rec = UVRecord(
+        timestamp: ts,
+        mvRaw: raw,
+        mvMedian: med,
+        mvKalman: kal,
+        mvHybrid: hyb,
+        uviCalibrated: uviEst,
+        uviLinearOld: GuvaCalibrationEngine.calculateOldLinearUVI(hyb),
+        uviLookupInt: GuvaCalibrationEngine.lookupDiscreteUVI(hyb),
+        riskCategory: GuvaCalibrationEngine.getRiskCategory(uviEst),
+        rssi: 0,
+      );
+
+      final bool alreadyExists = _allHistoryRecords.any((UVRecord r) =>
+          (r.timestamp.difference(rec.timestamp).inSeconds).abs() < 2);
+      if (!alreadyExists) {
+        _allHistoryRecords.add(rec);
+        newPointsAdded++;
+      }
+      newestFromDb = rec;
+    }
+
+    if (newPointsAdded > 0 || (_latestRecord == null && newestFromDb != null)) {
+      _allHistoryRecords
+          .sort((UVRecord a, UVRecord b) => a.timestamp.compareTo(b.timestamp));
+      if (!mounted) return;
+      setState(() {
+        if (newestFromDb != null) {
+          _latestRecord = newestFromDb;
+        }
+        _liveRecords
+          ..clear()
+          ..addAll(_allHistoryRecords.length > 60
+              ? _allHistoryRecords.sublist(_allHistoryRecords.length - 60)
+              : _allHistoryRecords);
+        _packetCount += newPointsAdded;
+        _status = 'Synced with InfluxDB Cloud & HiveMQ • #$_packetCount';
+      });
+    }
+  }
+
   void _toggleConnection() {
-    _pollTimer?.cancel();
     setState(() {
       _isSimulating = false;
       _isConnected = !_isConnected;
     });
 
     if (_isConnected) {
-      if (!_isMqttCloudConnected) _connectHiveMqCloud();
-      setState(() => _status = 'Syncing via HiveMQ Cloud & Local HTTP...');
-      _fetchLocalHttp();
-      _pollTimer = Timer.periodic(
-        Duration(seconds: _selectedPollSeconds),
-        (_) => _fetchLocalHttp(),
-      );
+      setState(() => _status = 'Syncing HiveMQ + InfluxDB + Local HTTP...');
+      _startAlwaysOnSync();
     } else {
+      _pollTimer?.cancel();
+      _influxSyncTimer?.cancel();
       setState(() => _status = 'Telemetry Paused');
     }
   }
@@ -333,16 +506,12 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     try {
       final http.Response response = await http
           .get(Uri.parse('http://$ip/data'))
-          .timeout(const Duration(milliseconds: 2200));
+          .timeout(const Duration(milliseconds: 1800));
 
       if (response.statusCode == 200) {
         _parseIncomingJson(response.body, source: 'Local Wi-Fi ($ip) + Cloud');
       }
-    } catch (_) {
-      if (_isMqttCloudConnected && mounted) {
-        setState(() => _status = 'Connected remotely via HiveMQ Cloud Broker');
-      }
-    }
+    } catch (_) {}
   }
 
   void _parseIncomingJson(String body, {required String source}) {
@@ -367,16 +536,17 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
 
   void _compute3FiltersLocallyAndRecord(double raw, int rssi,
       {required String source}) {
-    _winBuf.add(raw);
+    final double clampedRaw = raw.clamp(0.0, 1250.0);
+    _winBuf.add(clampedRaw);
     if (_winBuf.length > 9) _winBuf.removeAt(0);
 
     final List<double> sorted = List<double>.from(_winBuf)..sort();
     final double med = sorted[sorted.length ~/ 2];
 
-    if (_packetCount == 0) _kalX = raw;
+    if (_packetCount == 0) _kalX = clampedRaw;
     _kalP += 0.05;
     final double kG = _kalP / (_kalP + 2.5);
-    _kalX += kG * (raw - _kalX);
+    _kalX += kG * (clampedRaw - _kalX);
     _kalP = (1.0 - kG) * _kalP;
 
     if (_packetCount == 0) _hybX = med;
@@ -493,6 +663,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     }).toList();
   }
 
+  // ================= 24-HOUR DESCENDING ORDER RANKING =================
   List<HourlyBucketStat> _get24HrDescendingList() {
     final Iterable<UVRecord> dayRecords = _allHistoryRecords.where(
         (UVRecord r) =>
@@ -531,11 +702,16 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
       ));
     }
 
-    list24.sort((HourlyBucketStat a, HourlyBucketStat b) =>
-        b.peakUvi.compareTo(a.peakUvi));
+    // Sort strictly by descending UV Index (highest hour at index 0)
+    list24.sort((HourlyBucketStat a, HourlyBucketStat b) {
+      final int cmp = b.peakUvi.compareTo(a.peakUvi);
+      if (cmp != 0) return cmp;
+      return a.hour.compareTo(b.hour);
+    });
     return list24;
   }
 
+  // ================= GRANULAR TELEMETRY ROWS (SECONDS/MINUTES/HOURS/DAY) =================
   List<GranularTelemetryRow> _getGranularityTableRows() {
     final List<UVRecord> source = _getFilteredRecords();
     if (source.isEmpty) return <GranularTelemetryRow>[];
@@ -555,7 +731,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
       bucketed.putIfAbsent(key, () => <UVRecord>[]).add(r);
     }
 
-    return bucketed.entries.take(100).map((MapEntry<String, List<UVRecord>> e) {
+    return bucketed.entries.take(150).map((MapEntry<String, List<UVRecord>> e) {
       final List<UVRecord> recs = e.value;
       final double avgMv = recs
               .map((UVRecord r) => r.getMvByFilter(_selectedFilter))
@@ -571,6 +747,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     }).toList();
   }
 
+  // ================= CSV & GRAPH PNG EXPORTS =================
   Future<void> _downloadGranularityCsv() async {
     final List<GranularTelemetryRow> rows = _getGranularityTableRows();
     if (rows.isEmpty) {
@@ -582,8 +759,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     }
 
     final StringBuffer csv = StringBuffer();
-    csv.writeln(
-        'Time ($_timeGranularity),UV_Index_Calibrated,Voltage_mV,Filter_Used');
+    csv.writeln('Time ($_timeGranularity),UV_Data,Voltage,Active_Filter');
     for (final GranularTelemetryRow r in rows) {
       csv.writeln('${r.time},${r.uvData},${r.voltage},$_selectedFilter');
     }
@@ -593,7 +769,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
         '${dir.path}/uv_${_timeGranularity.toLowerCase()}_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv');
     await file.writeAsString(csv.toString());
     await Share.shareXFiles(<XFile>[XFile(file.path)],
-        text: 'UV Sensor Data ($_timeGranularity Granularity)');
+        text: 'UV Telemetry Data ($_timeGranularity)');
   }
 
   Future<void> _download3FilterComparisonCsv() async {
@@ -623,10 +799,10 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
 
     final Directory dir = await getTemporaryDirectory();
     final File file = File(
-        '${dir.path}/uv_3filter_comparison_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv');
+        '${dir.path}/uv_3filter_benchmark_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv');
     await file.writeAsString(csv.toString());
     await Share.shareXFiles(<XFile>[XFile(file.path)],
-        text: '3-Filter UV Comparison Dataset (Hybrid, Kalman, Median)');
+        text: '3-Filter Benchmark CSV (Hybrid, Kalman, Median)');
   }
 
   Future<void> _downloadGraphPng() async {
@@ -644,184 +820,12 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
           '${dir.path}/uv_graph_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.png');
       await file.writeAsBytes(byteData.buffer.asUint8List());
       await Share.shareXFiles(<XFile>[XFile(file.path)],
-          text: 'UV Sensor Graph Image ($_selectedFilter)');
+          text: 'UV Index Graph ($_selectedFilter)');
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('Graph Export Error: $e')));
     }
-  }
-
-  Future<void> _showPhoneStyleWiFiDialog() async {
-    final TextEditingController ssidCtrl = TextEditingController();
-    final TextEditingController passCtrl = TextEditingController();
-    final TextEditingController influxUrlCtrl = TextEditingController();
-    final TextEditingController influxTokCtrl = TextEditingController();
-    List<dynamic> scannedNetworks = <dynamic>[];
-    bool scanning = true;
-
-    await showDialog<void>(
-      context: context,
-      builder: (BuildContext ctx) => StatefulBuilder(
-        builder: (BuildContext ctx, StateSetter setDialogState) {
-          if (scanning) {
-            scanning = false;
-            final String ip = _ipController.text.trim();
-            http
-                .get(Uri.parse('http://$ip/scan'))
-                .timeout(const Duration(seconds: 4))
-                .then((http.Response res) {
-              if (res.statusCode == 200) {
-                final Map<String, dynamic> data =
-                    jsonDecode(res.body) as Map<String, dynamic>;
-                setDialogState(() {
-                  scannedNetworks =
-                      (data['networks'] as List<dynamic>?) ?? <dynamic>[];
-                });
-              }
-            }).catchError((Object _) {});
-          }
-
-          return AlertDialog(
-            backgroundColor: const Color(0xFF151F32),
-            title: const Row(
-              children: <Widget>[
-                Icon(Icons.wifi_rounded, color: Color(0xFF00F5D4)),
-                SizedBox(width: 8),
-                Expanded(
-                  child: Text('Connect ESP32 to Any Wi-Fi & Cloud',
-                      style:
-                          TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
-                ),
-              ],
-            ),
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  if (scannedNetworks.isNotEmpty) ...<Widget>[
-                    const Text('Tap an Available Network Found by ESP32:',
-                        style:
-                            TextStyle(fontSize: 11, color: Color(0xFF00F5D4))),
-                    const SizedBox(height: 6),
-                    SizedBox(
-                      height: 110,
-                      width: double.maxFinite,
-                      child: ListView.builder(
-                        itemCount: scannedNetworks.length,
-                        itemBuilder: (BuildContext _, int i) {
-                          final Map<String, dynamic> net =
-                              scannedNetworks[i] as Map<String, dynamic>;
-                          return ListTile(
-                            dense: true,
-                            contentPadding: EdgeInsets.zero,
-                            leading: const Icon(Icons.network_wifi,
-                                color: Colors.white70, size: 18),
-                            title: Text('${net['ssid']}',
-                                style: const TextStyle(fontSize: 12)),
-                            trailing: Text('${net['rssi']} dBm',
-                                style: const TextStyle(
-                                    fontSize: 10, color: Colors.white54)),
-                            onTap: () {
-                              setDialogState(() {
-                                ssidCtrl.text = net['ssid'].toString();
-                              });
-                            },
-                          );
-                        },
-                      ),
-                    ),
-                    const Divider(color: Colors.white24),
-                  ],
-                  TextField(
-                    controller: ssidCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Wi-Fi / Hotspot Name (SSID)',
-                      isDense: true,
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: passCtrl,
-                    obscureText: true,
-                    decoration: const InputDecoration(
-                      labelText: 'Wi-Fi Password',
-                      isDense: true,
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  const Text('Optional InfluxDB Cloud (For Live Grafana):',
-                      style: TextStyle(fontSize: 11, color: Colors.white60)),
-                  const SizedBox(height: 6),
-                  TextField(
-                    controller: influxUrlCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'InfluxDB Write URL',
-                      isDense: true,
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: influxTokCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'InfluxDB API Token',
-                      isDense: true,
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            actions: <Widget>[
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Cancel'),
-              ),
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF00F5D4),
-                  foregroundColor: Colors.black,
-                ),
-                onPressed: () async {
-                  final String ip = _ipController.text.trim();
-                  final NavigatorState nav = Navigator.of(ctx);
-                  final ScaffoldMessengerState messenger =
-                      ScaffoldMessenger.of(context);
-                  try {
-                    await http.post(
-                      Uri.parse('http://$ip/wifi'),
-                      body: <String, String>{
-                        'ssid': ssidCtrl.text.trim(),
-                        'pass': passCtrl.text,
-                        'influx_url': influxUrlCtrl.text.trim(),
-                        'influx_token': influxTokCtrl.text.trim(),
-                      },
-                    );
-                    nav.pop();
-                    messenger.showSnackBar(
-                      const SnackBar(
-                          content: Text(
-                              'Saved! ESP32 is connecting to the new Wi-Fi & syncing via HiveMQ Cloud.')),
-                    );
-                  } catch (e) {
-                    messenger.showSnackBar(
-                      const SnackBar(
-                          content: Text(
-                              'Tip: If switching away from old Wi-Fi, connect phone to "ESP32_UV_WiFi_Setup" AP (IP 192.168.4.1) first.')),
-                    );
-                  }
-                },
-                child: const Text('Connect ESP32'),
-              ),
-            ],
-          );
-        },
-      ),
-    );
   }
 
   Color _getRiskColor(double uvi) {
@@ -846,7 +850,9 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
 
     final List<HourlyBucketStat> hourlyRanked = _get24HrDescendingList();
     final List<GranularTelemetryRow> granularRows = _getGranularityTableRows();
-    final int currentYear = DateTime.now().year;
+
+    // Dynamic year options from 2020 to current year (expands automatically every year)
+    final int currentYear = max(2026, DateTime.now().year);
     final List<int> yearOptions =
         List<int>.generate((currentYear - 2020) + 1, (int i) => 2020 + i);
     final int maxDays = _daysInMonth(_selectedYear, _selectedMonth);
@@ -861,10 +867,9 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
         ),
         actions: <Widget>[
           IconButton(
-            tooltip: 'Connect ESP32 to Any Wi-Fi / Hotspot',
-            icon: const Icon(Icons.wifi_password_rounded,
-                color: Color(0xFF00F5D4)),
-            onPressed: _showPhoneStyleWiFiDialog,
+            tooltip: 'Sync Now with InfluxDB & Grafana Database',
+            icon: const Icon(Icons.cloud_sync_rounded, color: Color(0xFF00F5D4)),
+            onPressed: _syncFromInfluxDbCloud,
           ),
           TextButton.icon(
             onPressed: _toggleDemoStream,
@@ -888,6 +893,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
+              // ================= CONNECTION & CLOUD STATUS BAR =================
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
@@ -907,8 +913,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                                 fontWeight: FontWeight.bold,
                                 fontSize: 13),
                             decoration: InputDecoration(
-                              labelText:
-                                  'ESP32 Local IP (or 192.168.4.1 Setup)',
+                              labelText: 'ESP32 Local IP (Direct HTTP + Cloud)',
                               prefixIcon: const Icon(Icons.router_rounded,
                                   color: Color(0xFF00F5D4), size: 18),
                               filled: true,
@@ -950,28 +955,56 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                                   fontSize: 11, color: Colors.white70),
                               overflow: TextOverflow.ellipsis),
                         ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 3),
-                          decoration: BoxDecoration(
-                            color: (_isMqttCloudConnected
-                                    ? const Color(0xFF00F5D4)
-                                    : Colors.orange)
-                                .withOpacity(0.15),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            _isMqttCloudConnected
-                                ? 'HiveMQ Cloud: ONLINE'
-                                : 'HiveMQ: Connecting...',
-                            style: TextStyle(
-                              fontSize: 10,
-                              fontWeight: FontWeight.bold,
-                              color: _isMqttCloudConnected
-                                  ? const Color(0xFF00F5D4)
-                                  : Colors.orangeAccent,
+                        Row(
+                          children: <Widget>[
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: (_isInfluxCloudConnected
+                                        ? const Color(0xFF00BBF9)
+                                        : Colors.orange)
+                                    .withOpacity(0.15),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                _isInfluxCloudConnected
+                                    ? 'InfluxDB: SYNCED'
+                                    : 'InfluxDB: Syncing',
+                                style: TextStyle(
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.bold,
+                                  color: _isInfluxCloudConnected
+                                      ? const Color(0xFF00BBF9)
+                                      : Colors.orangeAccent,
+                                ),
+                              ),
                             ),
-                          ),
+                            const SizedBox(width: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: (_isMqttCloudConnected
+                                        ? const Color(0xFF00F5D4)
+                                        : Colors.orange)
+                                    .withOpacity(0.15),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                _isMqttCloudConnected
+                                    ? 'HiveMQ: ONLINE'
+                                    : 'HiveMQ: Wait',
+                                style: TextStyle(
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.bold,
+                                  color: _isMqttCloudConnected
+                                      ? const Color(0xFF00F5D4)
+                                      : Colors.orangeAccent,
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),
@@ -1022,6 +1055,8 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                 ),
               ),
               const SizedBox(height: 12),
+
+              // ================= TOP 3 KPI CARDS =================
               Row(
                 children: <Widget>[
                   Expanded(
@@ -1054,6 +1089,8 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                 ],
               ),
               const SizedBox(height: 12),
+
+              // ================= 3-FILTER JITTER COMPARISON STRIP =================
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
@@ -1080,34 +1117,39 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                           final double val =
                               _latestRecord?.getMvByFilter(fName) ?? 0.0;
                           final bool isSelected = _selectedFilter == fName;
-                          return Container(
-                            margin: const EdgeInsets.only(right: 8),
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 10, vertical: 6),
-                            decoration: BoxDecoration(
-                              color: isSelected
-                                  ? const Color(0xFF00F5D4).withOpacity(0.15)
-                                  : const Color(0xFF0B0F19),
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(
+                          return GestureDetector(
+                            onTap: () =>
+                                setState(() => _selectedFilter = fName),
+                            child: Container(
+                              margin: const EdgeInsets.only(right: 8),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 6),
+                              decoration: BoxDecoration(
                                 color: isSelected
-                                    ? const Color(0xFF00F5D4)
-                                    : Colors.white12,
+                                    ? const Color(0xFF00F5D4).withOpacity(0.15)
+                                    : const Color(0xFF0B0F19),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: isSelected
+                                      ? const Color(0xFF00F5D4)
+                                      : Colors.white12,
+                                ),
                               ),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: <Widget>[
-                                Text(fName,
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: <Widget>[
+                                  Text(fName,
+                                      style: const TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.bold)),
+                                  Text(
+                                    '${val.toStringAsFixed(1)} mV  (σ=${sigma.toStringAsFixed(2)})',
                                     style: const TextStyle(
                                         fontSize: 10,
-                                        fontWeight: FontWeight.bold)),
-                                Text(
-                                  '${val.toStringAsFixed(1)} mV  (σ=${sigma.toStringAsFixed(2)})',
-                                  style: const TextStyle(
-                                      fontSize: 10, color: Color(0xFF00F5D4)),
-                                ),
-                              ],
+                                        color: Color(0xFF00F5D4)),
+                                  ),
+                                ],
+                              ),
                             ),
                           );
                         }).toList(),
@@ -1117,6 +1159,8 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                 ),
               ),
               const SizedBox(height: 14),
+
+              // ================= LIVE UV GRAPH + PNG EXPORT =================
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: <Widget>[
@@ -1147,7 +1191,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                   child: _liveRecords.isEmpty
                       ? const Center(
                           child: Text(
-                            'Tap "Connect" or "Demo" to compare Filtered vs Unfiltered UV',
+                            'Waiting for live stream from HiveMQ / InfluxDB / ESP32...',
                             style:
                                 TextStyle(color: Colors.white54, fontSize: 12),
                           ),
@@ -1235,6 +1279,8 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                 ),
               ),
               const SizedBox(height: 16),
+
+              // ================= DATE / WEEK / MONTH / YEAR DROPDOWNS =================
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
@@ -1289,6 +1335,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                       spacing: 8,
                       runSpacing: 8,
                       children: <Widget>[
+                        // Year Dropdown (2020 to Present, auto-adds future years)
                         _buildDropdownChip<int>(
                           label: 'Year',
                           value: _selectedYear,
@@ -1299,6 +1346,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                           onChanged: (int? val) => setState(
                               () => _selectedYear = val ?? currentYear),
                         ),
+                        // Month Dropdown (Jan - Dec)
                         if (_periodMode != 'Year')
                           _buildDropdownChip<int>(
                             label: 'Month',
@@ -1313,6 +1361,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                             onChanged: (int? val) =>
                                 setState(() => _selectedMonth = val ?? 1),
                           ),
+                        // Week Dropdown (Week 1 - Week 5)
                         if (_periodMode == 'Week')
                           _buildDropdownChip<int>(
                             label: 'Week',
@@ -1327,6 +1376,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                             onChanged: (int? val) =>
                                 setState(() => _selectedWeek = val ?? 1),
                           ),
+                        // Individual Date Dropdown of that respective month
                         if (_periodMode == 'Date')
                           _buildDropdownChip<int>(
                             label: 'Date',
@@ -1348,6 +1398,8 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                 ),
               ),
               const SizedBox(height: 16),
+
+              // ================= 24-HOUR DESCENDING RANKING =================
               Text(
                 '24-Hour UV Ranking for $_selectedDay ${_monthNames[_selectedMonth - 1]} $_selectedYear (Descending Order)',
                 style:
@@ -1360,7 +1412,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
               ),
               const SizedBox(height: 8),
               Container(
-                height: 230,
+                height: 240,
                 decoration: BoxDecoration(
                   color: const Color(0xFF151F32),
                   borderRadius: BorderRadius.circular(14),
@@ -1371,7 +1423,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                   itemBuilder: (BuildContext ctx, int idx) {
                     final HourlyBucketStat hr = hourlyRanked[idx];
                     final double peakUvi = hr.peakUvi;
-                    final bool isHighestHour = idx == 0 && peakUvi > 0;
+                    final bool isHighestHour = idx == 0;
 
                     return Container(
                       margin: EdgeInsets.fromLTRB(
@@ -1393,7 +1445,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                             ? <BoxShadow>[
                                 BoxShadow(
                                   color:
-                                      const Color(0xFFFF0055).withOpacity(0.25),
+                                      const Color(0xFFFF0055).withOpacity(0.28),
                                   blurRadius: 8,
                                 )
                               ]
@@ -1453,6 +1505,8 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                 ),
               ),
               const SizedBox(height: 16),
+
+              // ================= TELEMETRY TABLE (SECONDS / MINUTES / HOURS / DAY) =================
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: <Widget>[
@@ -1491,7 +1545,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
               ),
               const SizedBox(height: 8),
               Container(
-                height: 210,
+                height: 220,
                 width: double.infinity,
                 decoration: BoxDecoration(
                   color: const Color(0xFF151F32),
