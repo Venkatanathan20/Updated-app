@@ -1,0 +1,88 @@
+﻿name: Build Flutter Android APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Configure Gradle Google Mirror & HTTP Retry
+        run: |
+          mkdir -p ~/.gradle
+          cat << 'EOF' > ~/.gradle/init.gradle
+          allprojects {
+            buildscript {
+              repositories {
+                maven { url "https://maven-central.storage-download.googleapis.com/maven2/" }
+                google()
+                mavenCentral()
+              }
+            }
+            repositories {
+              maven { url "https://maven-central.storage-download.googleapis.com/maven2/" }
+              google()
+              mavenCentral()
+            }
+          }
+          settingsEvaluated { settings ->
+            settings.pluginManagement {
+              repositories {
+                maven { url "https://maven-central.storage-download.googleapis.com/maven2/" }
+                gradlePluginPortal()
+                google()
+                mavenCentral()
+              }
+            }
+          }
+          EOF
+          cat << 'EOF' >> ~/.gradle/gradle.properties
+          org.gradle.internal.http.connectionTimeout=120000
+          org.gradle.internal.http.socketTimeout=120000
+          org.gradle.internal.repository.max.tentatives=10
+          org.gradle.internal.repository.initial.backoff=2000
+          EOF
+
+      - name: Install Flutter Dependencies
+        run: flutter pub get
+
+      - name: Verify Dart Syntax
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings lib/main.dart
+
+      - name: Build Release APK (with Auto-Retry on 504)
+        run: |
+          for attempt in 1 2 3 4; do
+            echo "Build attempt $attempt..."
+            if flutter build apk --release; then
+              echo "APK build succeeded!"
+              exit 0
+            fi
+            echo "Attempt $attempt hit a network timeout, retrying in 15s..."
+            sleep 15
+          done
+          exit 1
+
+      - name: Upload Release APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: uv-monitor-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
