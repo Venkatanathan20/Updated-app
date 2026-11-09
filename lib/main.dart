@@ -40,7 +40,7 @@ class UVMonitorApp extends StatelessWidget {
   }
 }
 
-// ================= PIECEWISE CALIBRATION ENGINE (TASK 1) =================
+// ================= PIECEWISE CALIBRATION ENGINE =================
 class GuvaCalibrationEngine {
   static const List<double> mvThresholds = <double>[
     50.0, 227.0, 318.0, 408.0, 503.0, 606.0,
@@ -79,7 +79,6 @@ class GuvaCalibrationEngine {
   }
 }
 
-// ================= TELEMETRY RECORD MODEL (3 FILTERS) =================
 class UVRecord {
   final DateTime timestamp;
   final double mvRaw;
@@ -118,8 +117,7 @@ class UVRecord {
   }
 
   double getUviByFilter(String filterName) {
-    return GuvaCalibrationEngine.calculateCalibratedUVI(
-        getMvByFilter(filterName));
+    return GuvaCalibrationEngine.calculateCalibratedUVI(getMvByFilter(filterName));
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
@@ -136,13 +134,9 @@ class UVRecord {
       };
 
   factory UVRecord.fromJson(Map<String, dynamic> json) {
-    final double hyb =
-        ((json['hyb'] ?? json['kal'] ?? json['mv'] ?? 0.0) as num).toDouble();
+    final double hyb = ((json['hyb'] ?? json['kal'] ?? json['mv'] ?? 0.0) as num).toDouble();
     final double raw = ((json['raw'] ?? hyb) as num).toDouble();
-    final double uviCal = ((json['uvi_cal'] ??
-            json['uv'] ??
-            GuvaCalibrationEngine.calculateCalibratedUVI(hyb)) as num)
-        .toDouble();
+    final double uviCal = ((json['uvi_cal'] ?? json['uv'] ?? GuvaCalibrationEngine.calculateCalibratedUVI(hyb)) as num).toDouble();
     return UVRecord(
       timestamp: DateTime.parse(json['ts'].toString()).toLocal(),
       mvRaw: raw,
@@ -151,12 +145,8 @@ class UVRecord {
       mvHybrid: hyb,
       uviCalibrated: uviCal,
       uviLinearOld: ((json['uvi_lin'] ?? (hyb / 100.0)) as num).toDouble(),
-      uviLookupInt: ((json['uvi_int'] ??
-              GuvaCalibrationEngine.lookupDiscreteUVI(hyb)) as num)
-          .toInt(),
-      riskCategory: (json['risk'] ??
-              GuvaCalibrationEngine.getRiskCategory(uviCal))
-          .toString(),
+      uviLookupInt: ((json['uvi_int'] ?? GuvaCalibrationEngine.lookupDiscreteUVI(hyb)) as num).toInt(),
+      riskCategory: (json['risk'] ?? GuvaCalibrationEngine.getRiskCategory(uviCal)).toString(),
       rssi: ((json['rssi'] ?? 0) as num).toInt(),
     );
   }
@@ -192,6 +182,18 @@ class GranularTelemetryRow {
   });
 }
 
+class ChartDataPoint {
+  final String label;
+  final double uviFiltered;
+  final double uviRaw;
+
+  ChartDataPoint({
+    required this.label,
+    required this.uviFiltered,
+    required this.uviRaw,
+  });
+}
+
 class UVMonitorScreen extends StatefulWidget {
   const UVMonitorScreen({super.key});
 
@@ -200,33 +202,26 @@ class UVMonitorScreen extends StatefulWidget {
 }
 
 class _UVMonitorScreenState extends State<UVMonitorScreen> {
-  final TextEditingController _ipController =
-      TextEditingController(text: '192.168.0.117');
+  final TextEditingController _ipController = TextEditingController(text: '192.168.0.117');
   final GlobalKey _chartBoundaryKey = GlobalKey();
 
-  // ================= INFLUXDB CLOUD & HIVEMQ CONFIG =================
-  static const String _influxBaseUrl =
-      'https://us-east-1-1.aws.cloud2.influxdata.com';
+  // ================= CLOUD SETTINGS =================
+  static const String _influxBaseUrl = 'https://us-east-1-1.aws.cloud2.influxdata.com';
   static const String _influxOrg = 'IOT';
   static const String _influxBucket = 'uv_sensor_data';
-  static const String _influxToken =
-      'Dbzt7IHP3G4E4McgOmsRBrZLUaK2fsEgexNVFzYSQI1V2PhqWbL6SFhB64Vg-jOY6HQIu7BibH8jkSQvHqLNWw==';
-
-  static const String _mqttBroker = 'broker.hivemq.com';
-  static const String _mqttTopic = 'venkat_iot/sensors/uv/node_01';
+  static const String _influxToken = 'Dbzt7IHP3G4E4McgOmsRBrZLUaK2fsEgexNVFzYSQI1V2PhqWbL6SFhB64Vg-jOY6HQIu7BibH8jkSQvHqLNWw==';
 
   Timer? _pollTimer;
   Timer? _influxSyncTimer;
   MqttServerClient? _mqttClient;
 
-  bool _isConnected = true;
+  bool _isConnected = false;
   bool _isMqttCloudConnected = false;
   bool _isInfluxCloudConnected = false;
   bool _isSimulating = false;
-  String _status = 'Auto-connecting to HiveMQ & InfluxDB Cloud...';
-  final int _selectedPollSeconds = 3;
+  String _status = 'Tap Connect (Auto-syncs via HiveMQ Cloud, InfluxDB & Local)';
+  final int _selectedPollSeconds = 5;
 
-  // ================= 3-FILTER SELECTION =================
   String _selectedFilter = 'Hybrid (Median+Kalman)';
   bool _overlayRawOnChart = true;
   final List<String> _filterOptions = <String>[
@@ -235,7 +230,6 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     'Median Filter',
   ];
 
-  // Fallback local DSP state
   final List<double> _winBuf = <double>[];
   double _kalX = 0.0, _kalP = 1.0;
   double _hybX = 0.0, _hybP = 1.0;
@@ -246,13 +240,14 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
   final List<UVRecord> _liveRecords = <UVRecord>[];
   List<UVRecord> _allHistoryRecords = <UVRecord>[];
 
-  // ================= PERIOD & GRANULARITY DROPDOWN STATE =================
-  String _periodMode = 'Date'; // Date, Week, Month, Year
+  String _periodMode = 'Date';
   int _selectedYear = DateTime.now().year;
   int _selectedMonth = DateTime.now().month;
   int _selectedWeek = ((DateTime.now().day - 1) ~/ 7) + 1;
   int _selectedDay = DateTime.now().day;
-  String _timeGranularity = 'Seconds'; // Seconds, Minutes, Hours, Day
+  
+  String _chartGranularity = 'Seconds';
+  String _timeGranularity = 'Seconds';
 
   static const List<String> _monthNames = <String>[
     'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
@@ -263,7 +258,6 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
   void initState() {
     super.initState();
     _loadSavedHistory();
-    _startAlwaysOnSync();
   }
 
   @override
@@ -275,101 +269,37 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     super.dispose();
   }
 
-  void _startAlwaysOnSync() {
-    _connectHiveMqCloud();
-    _syncFromInfluxDbCloud();
-    _fetchLocalHttp();
-
-    _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(
-      Duration(seconds: _selectedPollSeconds),
-      (_) {
-        if (_isConnected && !_isSimulating) {
-          _fetchLocalHttp();
-        }
-      },
-    );
-
-    _influxSyncTimer?.cancel();
-    _influxSyncTimer = Timer.periodic(
-      const Duration(seconds: 6),
-      (_) {
-        if (_isConnected && !_isSimulating) {
-          _syncFromInfluxDbCloud();
-        }
-      },
-    );
-  }
-
   Future<void> _loadSavedHistory() async {
     final SharedPreferences prefs = await SharedPreferences.getInstance();
     final List<String>? savedJson = prefs.getStringList('uv_history_logs_v4');
-    if (savedJson != null && savedJson.isNotEmpty) {
-      final List<UVRecord> loaded = savedJson
-          .map((String str) =>
-              UVRecord.fromJson(jsonDecode(str) as Map<String, dynamic>))
-          .toList();
-      if (!mounted) return;
+    if (savedJson != null) {
       setState(() {
-        _allHistoryRecords = loaded;
-        _liveRecords
-          ..clear()
-          ..addAll(loaded.length > 60
-              ? loaded.sublist(loaded.length - 60)
-              : loaded);
-        _latestRecord = loaded.last;
+        _allHistoryRecords = savedJson
+            .map((String str) => UVRecord.fromJson(jsonDecode(str) as Map<String, dynamic>))
+            .toList();
+        if (_allHistoryRecords.isNotEmpty) {
+          _liveRecords.addAll(_allHistoryRecords.length > 60
+              ? _allHistoryRecords.sublist(_allHistoryRecords.length - 60)
+              : _allHistoryRecords);
+        }
       });
     }
   }
 
   Future<void> _saveRecordToHistory(UVRecord record) async {
-    // Deduplicate timestamps within 1 second
     final bool exists = _allHistoryRecords.any((UVRecord r) =>
         (r.timestamp.difference(record.timestamp).inSeconds).abs() < 1);
     if (!exists) {
       _allHistoryRecords.add(record);
-      _allHistoryRecords.sort(
-          (UVRecord a, UVRecord b) => a.timestamp.compareTo(b.timestamp));
-      if (_allHistoryRecords.length > 8000) {
-        _allHistoryRecords.removeRange(0, _allHistoryRecords.length - 8000);
-      }
+      _allHistoryRecords.sort((UVRecord a, UVRecord b) => a.timestamp.compareTo(b.timestamp));
+      if (_allHistoryRecords.length > 8000) _allHistoryRecords.removeAt(0);
       final SharedPreferences prefs = await SharedPreferences.getInstance();
-      final List<String> encoded = _allHistoryRecords
-          .map((UVRecord r) => jsonEncode(r.toJson()))
-          .toList();
+      final List<String> encoded = _allHistoryRecords.map((UVRecord r) => jsonEncode(r.toJson())).toList();
       await prefs.setStringList('uv_history_logs_v4', encoded);
     }
   }
 
-  // ================= HIVEMQ CLOUD MQTT STREAM =================
-  Future<void> _connectHiveMqCloud() async {
-    final String clientId = 'flutter_uv_${Random().nextInt(999999)}';
-    _mqttClient = MqttServerClient.withPort(_mqttBroker, clientId, 1883);
-    _mqttClient!.keepAlivePeriod = 30;
-    _mqttClient!.autoReconnect = true;
-    _mqttClient!.onConnected = () {
-      if (mounted) setState(() => _isMqttCloudConnected = true);
-      _mqttClient!.subscribe(_mqttTopic, MqttQos.atMostOnce);
-    };
-    _mqttClient!.onDisconnected = () {
-      if (mounted) setState(() => _isMqttCloudConnected = false);
-    };
-
-    try {
-      await _mqttClient!.connect();
-      _mqttClient!.updates?.listen((List<MqttReceivedMessage<MqttMessage>> c) {
-        if (!_isConnected || _isSimulating) return;
-        final MqttPublishMessage recMess = c[0].payload as MqttPublishMessage;
-        final String payload =
-            MqttPublishPayload.bytesToStringAsString(recMess.payload.message);
-        _parseIncomingJson(payload, source: 'HiveMQ Cloud + Grafana Sync');
-      });
-    } catch (_) {
-      if (mounted) setState(() => _isMqttCloudConnected = false);
-    }
-  }
-
-  // ================= INFLUXDB CLOUD DATABASE SYNC =================
+  // ================= INFLUXDB CLOUD SYNC =================
   Future<void> _syncFromInfluxDbCloud() async {
     try {
       const String fluxQuery = '''
@@ -382,19 +312,16 @@ from(bucket: "$_influxBucket")
   |> tail(n: 120)
 ''';
 
-      final Uri uri =
-          Uri.parse('$_influxBaseUrl/api/v2/query?org=$_influxOrg');
-      final http.Response response = await http
-          .post(
-            uri,
-            headers: <String, String>{
-              'Authorization': 'Token $_influxToken',
-              'Content-Type': 'application/vnd.flux',
-              'Accept': 'application/csv',
-            },
-            body: fluxQuery,
-          )
-          .timeout(const Duration(seconds: 5));
+      final Uri uri = Uri.parse('$_influxBaseUrl/api/v2/query?org=$_influxOrg');
+      final http.Response response = await http.post(
+        uri,
+        headers: <String, String>{
+          'Authorization': 'Token $_influxToken',
+          'Content-Type': 'application/vnd.flux',
+          'Accept': 'application/csv',
+        },
+        body: fluxQuery,
+      ).timeout(const Duration(seconds: 5));
 
       if (response.statusCode == 200 && response.body.trim().isNotEmpty) {
         if (mounted) setState(() => _isInfluxCloudConnected = true);
@@ -410,9 +337,6 @@ from(bucket: "$_influxBucket")
     if (lines.length < 2) return;
 
     List<String>? headers;
-    int newPointsAdded = 0;
-    UVRecord? newestFromDb;
-
     for (final String rawLine in lines) {
       final String line = rawLine.trim();
       if (line.isEmpty || line.startsWith('#')) continue;
@@ -432,16 +356,11 @@ from(bucket: "$_influxBucket")
       final DateTime? ts = DateTime.tryParse(rowMap['_time'] ?? '')?.toLocal();
       if (ts == null) continue;
 
-      final double raw =
-          double.tryParse(rowMap['voltage_raw_mv'] ?? '') ?? 0.0;
-      final double med =
-          double.tryParse(rowMap['voltage_median_mv'] ?? '') ?? raw;
-      final double kal =
-          double.tryParse(rowMap['voltage_kalman_mv'] ?? '') ?? raw;
-      final double hyb =
-          double.tryParse(rowMap['voltage_hybrid_mv'] ?? '') ?? raw;
-      final double uviEst = double.tryParse(rowMap['uv_index_estimated'] ?? '') ??
-          GuvaCalibrationEngine.calculateCalibratedUVI(hyb);
+      final double raw = double.tryParse(rowMap['voltage_raw_mv'] ?? '') ?? 0.0;
+      final double med = double.tryParse(rowMap['voltage_median_mv'] ?? '') ?? raw;
+      final double kal = double.tryParse(rowMap['voltage_kalman_mv'] ?? '') ?? raw;
+      final double hyb = double.tryParse(rowMap['voltage_hybrid_mv'] ?? '') ?? raw;
+      final double uviEst = double.tryParse(rowMap['uv_index_estimated'] ?? '') ?? GuvaCalibrationEngine.calculateCalibratedUVI(hyb);
 
       final UVRecord rec = UVRecord(
         timestamp: ts,
@@ -460,27 +379,40 @@ from(bucket: "$_influxBucket")
           (r.timestamp.difference(rec.timestamp).inSeconds).abs() < 2);
       if (!alreadyExists) {
         _allHistoryRecords.add(rec);
-        newPointsAdded++;
-      }
-      newestFromDb = rec;
-    }
-
-    if (newPointsAdded > 0 || (_latestRecord == null && newestFromDb != null)) {
-      _allHistoryRecords
-          .sort((UVRecord a, UVRecord b) => a.timestamp.compareTo(b.timestamp));
-      if (!mounted) return;
-      setState(() {
-        if (newestFromDb != null) {
-          _latestRecord = newestFromDb;
+        if (mounted) {
+          setState(() {
+            _latestRecord = rec;
+            _liveRecords.add(rec);
+            if (_liveRecords.length > 60) _liveRecords.removeAt(0);
+          });
         }
-        _liveRecords
-          ..clear()
-          ..addAll(_allHistoryRecords.length > 60
-              ? _allHistoryRecords.sublist(_allHistoryRecords.length - 60)
-              : _allHistoryRecords);
-        _packetCount += newPointsAdded;
-        _status = 'Synced with InfluxDB Cloud & HiveMQ • #$_packetCount';
+      }
+    }
+  }
+
+  Future<void> _connectHiveMqCloud() async {
+    final String clientId = 'flutter_uv_${Random().nextInt(99999)}';
+    _mqttClient = MqttServerClient.withPort('broker.hivemq.com', clientId, 1883);
+    _mqttClient!.keepAlivePeriod = 30;
+    _mqttClient!.autoReconnect = true;
+    _mqttClient!.onConnected = () {
+      if (mounted) setState(() => _isMqttCloudConnected = true);
+      _mqttClient!.subscribe('venkat_iot/sensors/uv/node_01', MqttQos.atMostOnce);
+    };
+    _mqttClient!.onDisconnected = () {
+      if (mounted) setState(() => _isMqttCloudConnected = false);
+    };
+
+    try {
+      await _mqttClient!.connect();
+      _mqttClient!.updates?.listen((List<MqttReceivedMessage<MqttMessage>> c) {
+        if (!_isConnected || _isSimulating) return;
+        final MqttPublishMessage recMess = c[0].payload as MqttPublishMessage;
+        final String payload = MqttPublishPayload.bytesToStringAsString(recMess.payload.message);
+        _parseIncomingJson(payload, source: 'HiveMQ Cloud');
       });
+    } catch (_) {
+      if (mounted) setState(() => _isMqttCloudConnected = false);
     }
   }
 
@@ -491,8 +423,23 @@ from(bucket: "$_influxBucket")
     });
 
     if (_isConnected) {
-      setState(() => _status = 'Syncing HiveMQ + InfluxDB + Local HTTP...');
-      _startAlwaysOnSync();
+      if (!_isMqttCloudConnected) _connectHiveMqCloud();
+      _syncFromInfluxDbCloud();
+      _fetchLocalHttp();
+
+      _pollTimer?.cancel();
+      _pollTimer = Timer.periodic(
+        Duration(seconds: _selectedPollSeconds),
+        (_) => _fetchLocalHttp(),
+      );
+      
+      _influxSyncTimer?.cancel();
+      _influxSyncTimer = Timer.periodic(
+        const Duration(seconds: 10),
+        (_) => _syncFromInfluxDbCloud(),
+      );
+      
+      setState(() => _status = 'Syncing via HiveMQ, InfluxDB & Local HTTP...');
     } else {
       _pollTimer?.cancel();
       _influxSyncTimer?.cancel();
@@ -506,21 +453,22 @@ from(bucket: "$_influxBucket")
     try {
       final http.Response response = await http
           .get(Uri.parse('http://$ip/data'))
-          .timeout(const Duration(milliseconds: 1800));
+          .timeout(const Duration(milliseconds: 2200));
 
       if (response.statusCode == 200) {
-        _parseIncomingJson(response.body, source: 'Local Wi-Fi ($ip) + Cloud');
+        _parseIncomingJson(response.body, source: 'Local Wi-Fi ($ip)');
       }
-    } catch (_) {}
+    } catch (_) {
+      if (_isMqttCloudConnected && mounted) {
+        setState(() => _status = 'Connected remotely via HiveMQ/InfluxDB');
+      }
+    }
   }
 
   void _parseIncomingJson(String body, {required String source}) {
     try {
-      final Map<String, dynamic> data =
-          jsonDecode(body) as Map<String, dynamic>;
-      final double raw = double.tryParse(
-              (data['mv_raw'] ?? data['sensor_mv'] ?? '0').toString()) ??
-          0.0;
+      final Map<String, dynamic> data = jsonDecode(body) as Map<String, dynamic>;
+      final double raw = double.tryParse((data['mv_raw'] ?? data['sensor_mv'] ?? '0').toString()) ?? 0.0;
       final int rssi = int.tryParse((data['rssi_dbm'] ?? '0').toString()) ?? 0;
 
       if (data.containsKey('mv_hybrid')) {
@@ -534,19 +482,17 @@ from(bucket: "$_influxBucket")
     } catch (_) {}
   }
 
-  void _compute3FiltersLocallyAndRecord(double raw, int rssi,
-      {required String source}) {
-    final double clampedRaw = raw.clamp(0.0, 1250.0);
-    _winBuf.add(clampedRaw);
+  void _compute3FiltersLocallyAndRecord(double raw, int rssi, {required String source}) {
+    _winBuf.add(raw);
     if (_winBuf.length > 9) _winBuf.removeAt(0);
 
     final List<double> sorted = List<double>.from(_winBuf)..sort();
     final double med = sorted[sorted.length ~/ 2];
 
-    if (_packetCount == 0) _kalX = clampedRaw;
+    if (_packetCount == 0) _kalX = raw;
     _kalP += 0.05;
     final double kG = _kalP / (_kalP + 2.5);
-    _kalX += kG * (clampedRaw - _kalX);
+    _kalX += kG * (raw - _kalX);
     _kalP = (1.0 - kG) * _kalP;
 
     if (_packetCount == 0) _hybX = med;
@@ -558,14 +504,7 @@ from(bucket: "$_influxBucket")
     _recordSample(raw, med, _kalX, _hybX, rssi, source: source);
   }
 
-  void _recordSample(
-    double raw,
-    double med,
-    double kal,
-    double hyb,
-    int rssi, {
-    required String source,
-  }) {
+  void _recordSample(double raw, double med, double kal, double hyb, int rssi, {required String source}) {
     if (!mounted) return;
 
     final double uviCal = GuvaCalibrationEngine.calculateCalibratedUVI(hyb);
@@ -599,6 +538,7 @@ from(bucket: "$_influxBucket")
 
   void _toggleDemoStream() {
     _pollTimer?.cancel();
+    _influxSyncTimer?.cancel();
     setState(() {
       _isConnected = false;
       _isSimulating = !_isSimulating;
@@ -620,20 +560,17 @@ from(bucket: "$_influxBucket")
     final double whiteNoise = (rng.nextDouble() - 0.5) * 30.0;
     final double wifiSpike = (rng.nextInt(4) == 0) ? 165.0 : 0.0;
     final double raw = (baseMv + whiteNoise + wifiSpike).clamp(20.0, 1250.0);
-    _compute3FiltersLocallyAndRecord(raw, -51,
-        source: 'Demo Noise Filter Test');
+    _compute3FiltersLocallyAndRecord(raw, -51, source: 'Demo Noise Filter Test');
   }
 
   double _calcFilterStdDev(String filterName) {
     if (_liveRecords.length < 3) return 0.0;
-    final List<double> vals =
-        _liveRecords.map((UVRecord r) => r.getMvByFilter(filterName)).toList();
+    final List<double> vals = _liveRecords.map((UVRecord r) => r.getMvByFilter(filterName)).toList();
     final List<double> diffs = <double>[];
     for (int i = 1; i < vals.length; i++) {
       diffs.add(vals[i] - vals[i - 1]);
     }
-    final double mean =
-        diffs.reduce((double a, double b) => a + b) / diffs.length;
+    final double mean = diffs.reduce((double a, double b) => a + b) / diffs.length;
     final double variance = diffs
             .map((double d) => pow(d - mean, 2).toDouble())
             .reduce((double a, double b) => a + b) /
@@ -652,21 +589,15 @@ from(bucket: "$_influxBucket")
         return ts.year == _selectedYear && ts.month == _selectedMonth;
       } else if (_periodMode == 'Week') {
         final int wk = ((ts.day - 1) ~/ 7) + 1;
-        return ts.year == _selectedYear &&
-            ts.month == _selectedMonth &&
-            wk == _selectedWeek;
+        return ts.year == _selectedYear && ts.month == _selectedMonth && wk == _selectedWeek;
       } else {
-        return ts.year == _selectedYear &&
-            ts.month == _selectedMonth &&
-            ts.day == _selectedDay;
+        return ts.year == _selectedYear && ts.month == _selectedMonth && ts.day == _selectedDay;
       }
     }).toList();
   }
 
-  // ================= 24-HOUR DESCENDING ORDER RANKING =================
   List<HourlyBucketStat> _get24HrDescendingList() {
-    final Iterable<UVRecord> dayRecords = _allHistoryRecords.where(
-        (UVRecord r) =>
+    final Iterable<UVRecord> dayRecords = _allHistoryRecords.where((UVRecord r) =>
             r.timestamp.year == _selectedYear &&
             r.timestamp.month == _selectedMonth &&
             r.timestamp.day == _selectedDay);
@@ -693,8 +624,7 @@ from(bucket: "$_influxBucket")
       }
       list24.add(HourlyBucketStat(
         hour: h,
-        timeSlot:
-            '${h.toString().padLeft(2, '0')}:00 - ${h.toString().padLeft(2, '0')}:59',
+        timeSlot: '${h.toString().padLeft(2, '0')}:00 - ${h.toString().padLeft(2, '0')}:59',
         peakUvi: peakUvi,
         avgMv: avgMv,
         count: items.length,
@@ -702,16 +632,50 @@ from(bucket: "$_influxBucket")
       ));
     }
 
-    // Sort strictly by descending UV Index (highest hour at index 0)
-    list24.sort((HourlyBucketStat a, HourlyBucketStat b) {
-      final int cmp = b.peakUvi.compareTo(a.peakUvi);
-      if (cmp != 0) return cmp;
-      return a.hour.compareTo(b.hour);
-    });
+    list24.sort((HourlyBucketStat a, HourlyBucketStat b) => b.peakUvi.compareTo(a.peakUvi));
     return list24;
   }
 
-  // ================= GRANULAR TELEMETRY ROWS (SECONDS/MINUTES/HOURS/DAY) =================
+  // ================= DYNAMIC GRAPH AGGREGATION =================
+  List<ChartDataPoint> _getAggregatedChartPoints() {
+    final List<UVRecord> source = _getFilteredRecords();
+    if (source.isEmpty) return [];
+
+    final Map<String, List<UVRecord>> bucketed = {};
+    for (final UVRecord r in source) {
+      String key;
+      if (_chartGranularity == 'Seconds') {
+        key = DateFormat('HH:mm:ss').format(r.timestamp);
+      } else if (_chartGranularity == 'Minutes') {
+        key = DateFormat('MM-dd HH:mm').format(r.timestamp);
+      } else if (_chartGranularity == 'Hours') {
+        key = DateFormat('MM-dd HH:00').format(r.timestamp);
+      } else if (_chartGranularity == 'Days') {
+        key = DateFormat('MM-dd').format(r.timestamp);
+      } else if (_chartGranularity == 'Months') {
+        key = DateFormat('yyyy-MM').format(r.timestamp);
+      } else {
+        key = DateFormat('yyyy').format(r.timestamp);
+      }
+      bucketed.putIfAbsent(key, () => []).add(r);
+    }
+
+    final List<ChartDataPoint> points = [];
+    bucketed.forEach((String key, List<UVRecord> recs) {
+      final double avgRawMv = recs.map((r) => r.mvRaw).reduce((a, b) => a + b) / recs.length;
+      final double avgFiltMv = recs.map((r) => r.getMvByFilter(_selectedFilter)).reduce((a, b) => a + b) / recs.length;
+      points.add(ChartDataPoint(
+        label: key,
+        uviFiltered: GuvaCalibrationEngine.calculateCalibratedUVI(avgFiltMv),
+        uviRaw: GuvaCalibrationEngine.calculateCalibratedUVI(avgRawMv),
+      ));
+    });
+    
+    // Sort chronologically
+    points.sort((a, b) => a.label.compareTo(b.label));
+    return points;
+  }
+
   List<GranularTelemetryRow> _getGranularityTableRows() {
     final List<UVRecord> source = _getFilteredRecords();
     if (source.isEmpty) return <GranularTelemetryRow>[];
@@ -731,56 +695,45 @@ from(bucket: "$_influxBucket")
       bucketed.putIfAbsent(key, () => <UVRecord>[]).add(r);
     }
 
-    return bucketed.entries.take(150).map((MapEntry<String, List<UVRecord>> e) {
+    return bucketed.entries.take(100).map((MapEntry<String, List<UVRecord>> e) {
       final List<UVRecord> recs = e.value;
-      final double avgMv = recs
-              .map((UVRecord r) => r.getMvByFilter(_selectedFilter))
-              .reduce((double a, double b) => a + b) /
-          recs.length;
+      final double avgMv = recs.map((UVRecord r) => r.getMvByFilter(_selectedFilter)).reduce((double a, double b) => a + b) / recs.length;
       final double avgUvi = GuvaCalibrationEngine.calculateCalibratedUVI(avgMv);
       return GranularTelemetryRow(
         time: e.key,
-        uvData:
-            '${avgUvi.toStringAsFixed(2)} UVI (${GuvaCalibrationEngine.getRiskCategory(avgUvi)})',
+        uvData: '${avgUvi.toStringAsFixed(2)} UVI (${GuvaCalibrationEngine.getRiskCategory(avgUvi)})',
         voltage: '${avgMv.toStringAsFixed(1)} mV',
       );
     }).toList();
   }
 
-  // ================= CSV & GRAPH PNG EXPORTS =================
   Future<void> _downloadGranularityCsv() async {
     final List<GranularTelemetryRow> rows = _getGranularityTableRows();
     if (rows.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('No data in current selection to download!')),
+        const SnackBar(content: Text('No data in current selection to download!')),
       );
       return;
     }
 
     final StringBuffer csv = StringBuffer();
-    csv.writeln('Time ($_timeGranularity),UV_Data,Voltage,Active_Filter');
+    csv.writeln('Time ($_timeGranularity),UV_Index_Calibrated,Voltage_mV,Filter_Used');
     for (final GranularTelemetryRow r in rows) {
       csv.writeln('${r.time},${r.uvData},${r.voltage},$_selectedFilter');
     }
 
     final Directory dir = await getTemporaryDirectory();
-    final File file = File(
-        '${dir.path}/uv_${_timeGranularity.toLowerCase()}_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv');
+    final File file = File('${dir.path}/uv_${_timeGranularity.toLowerCase()}_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv');
     await file.writeAsString(csv.toString());
-    await Share.shareXFiles(<XFile>[XFile(file.path)],
-        text: 'UV Telemetry Data ($_timeGranularity)');
+    await Share.shareXFiles(<XFile>[XFile(file.path)], text: 'UV Sensor Data ($_timeGranularity Granularity)');
   }
 
   Future<void> _download3FilterComparisonCsv() async {
-    final List<UVRecord> list = _getFilteredRecords().isNotEmpty
-        ? _getFilteredRecords()
-        : _allHistoryRecords;
+    final List<UVRecord> list = _getFilteredRecords().isNotEmpty ? _getFilteredRecords() : _allHistoryRecords;
     if (list.isEmpty) return;
 
     final StringBuffer csv = StringBuffer();
-    csv.writeln(
-        'Timestamp,Raw_mV,Median_mV,Kalman_mV,Hybrid_MedKal_mV,UVI_Calibrated,UVI_Lookup_Int,UVI_Linear_Old,Risk_Category');
+    csv.writeln('Timestamp,Raw_mV,Median_mV,Kalman_mV,Hybrid_MedKal_mV,UVI_Calibrated,UVI_Lookup_Int,UVI_Linear_Old,Risk_Category');
 
     final DateFormat df = DateFormat('yyyy-MM-dd HH:mm:ss');
     for (final UVRecord r in list) {
@@ -798,34 +751,163 @@ from(bucket: "$_influxBucket")
     }
 
     final Directory dir = await getTemporaryDirectory();
-    final File file = File(
-        '${dir.path}/uv_3filter_benchmark_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv');
+    final File file = File('${dir.path}/uv_3filter_comparison_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv');
     await file.writeAsString(csv.toString());
-    await Share.shareXFiles(<XFile>[XFile(file.path)],
-        text: '3-Filter Benchmark CSV (Hybrid, Kalman, Median)');
+    await Share.shareXFiles(<XFile>[XFile(file.path)], text: '3-Filter UV Comparison Dataset (Hybrid, Kalman, Median)');
   }
 
   Future<void> _downloadGraphPng() async {
     try {
-      final RenderRepaintBoundary? boundary = _chartBoundaryKey.currentContext
-          ?.findRenderObject() as RenderRepaintBoundary?;
+      final RenderRepaintBoundary? boundary = _chartBoundaryKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
       if (boundary == null) return;
       final ui.Image image = await boundary.toImage(pixelRatio: 3.0);
-      final ByteData? byteData =
-          await image.toByteData(format: ui.ImageByteFormat.png);
+      final ByteData? byteData = await image.toByteData(format: ui.ImageByteFormat.png);
       if (byteData == null) return;
 
       final Directory dir = await getTemporaryDirectory();
-      final File file = File(
-          '${dir.path}/uv_graph_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.png');
+      final File file = File('${dir.path}/uv_graph_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.png');
       await file.writeAsBytes(byteData.buffer.asUint8List());
-      await Share.shareXFiles(<XFile>[XFile(file.path)],
-          text: 'UV Index Graph ($_selectedFilter)');
+      await Share.shareXFiles(<XFile>[XFile(file.path)], text: 'UV Sensor Graph Image ($_selectedFilter)');
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Graph Export Error: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Graph Export Error: $e')));
     }
+  }
+
+  Future<void> _showPhoneStyleWiFiDialog() async {
+    final TextEditingController ssidCtrl = TextEditingController();
+    final TextEditingController passCtrl = TextEditingController();
+    final TextEditingController influxUrlCtrl = TextEditingController();
+    final TextEditingController influxTokCtrl = TextEditingController();
+    List<dynamic> scannedNetworks = <dynamic>[];
+    bool scanning = true;
+
+    await showDialog<void>(
+      context: context,
+      builder: (BuildContext ctx) => StatefulBuilder(
+        builder: (BuildContext ctx, StateSetter setDialogState) {
+          if (scanning) {
+            scanning = false;
+            final String ip = _ipController.text.trim();
+            http
+                .get(Uri.parse('http://$ip/scan'))
+                .timeout(const Duration(seconds: 4))
+                .then((http.Response res) {
+              if (res.statusCode == 200) {
+                final Map<String, dynamic> data = jsonDecode(res.body) as Map<String, dynamic>;
+                setDialogState(() {
+                  scannedNetworks = (data['networks'] as List<dynamic>?) ?? <dynamic>[];
+                });
+              }
+            }).catchError((Object _) {});
+          }
+
+          return AlertDialog(
+            backgroundColor: const Color(0xFF151F32),
+            title: const Row(
+              children: <Widget>[
+                Icon(Icons.wifi_rounded, color: Color(0xFF00F5D4)),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text('Connect ESP32 to Any Wi-Fi', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                ),
+              ],
+            ),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  if (scannedNetworks.isNotEmpty) ...<Widget>[
+                    const Text('Tap an Available Network Found by ESP32:', style: TextStyle(fontSize: 11, color: Color(0xFF00F5D4))),
+                    const SizedBox(height: 6),
+                    SizedBox(
+                      height: 110,
+                      width: double.maxFinite,
+                      child: ListView.builder(
+                        itemCount: scannedNetworks.length,
+                        itemBuilder: (BuildContext _, int i) {
+                          final Map<String, dynamic> net = scannedNetworks[i] as Map<String, dynamic>;
+                          return ListTile(
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            leading: const Icon(Icons.network_wifi, color: Colors.white70, size: 18),
+                            title: Text('${net['ssid']}', style: const TextStyle(fontSize: 12)),
+                            trailing: Text('${net['rssi']} dBm', style: const TextStyle(fontSize: 10, color: Colors.white54)),
+                            onTap: () {
+                              setDialogState(() {
+                                ssidCtrl.text = net['ssid'].toString();
+                              });
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                    const Divider(color: Colors.white24),
+                  ],
+                  TextField(
+                    controller: ssidCtrl,
+                    decoration: const InputDecoration(labelText: 'Wi-Fi / Hotspot Name (SSID)', isDense: true, border: OutlineInputBorder()),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: passCtrl,
+                    obscureText: true,
+                    decoration: const InputDecoration(labelText: 'Wi-Fi Password', isDense: true, border: OutlineInputBorder()),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text('Optional InfluxDB Cloud (For Live Grafana):', style: TextStyle(fontSize: 11, color: Colors.white60)),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: influxUrlCtrl,
+                    decoration: const InputDecoration(labelText: 'InfluxDB Write URL', isDense: true, border: OutlineInputBorder()),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: influxTokCtrl,
+                    decoration: const InputDecoration(labelText: 'InfluxDB API Token', isDense: true, border: OutlineInputBorder()),
+                  ),
+                ],
+              ),
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00F5D4), foregroundColor: Colors.black),
+                onPressed: () async {
+                  final String ip = _ipController.text.trim();
+                  final NavigatorState nav = Navigator.of(ctx);
+                  final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
+                  try {
+                    await http.post(
+                      Uri.parse('http://$ip/wifi'),
+                      body: <String, String>{
+                        'ssid': ssidCtrl.text.trim(),
+                        'pass': passCtrl.text,
+                        'influx_url': influxUrlCtrl.text.trim(),
+                        'influx_token': influxTokCtrl.text.trim(),
+                      },
+                    );
+                    nav.pop();
+                    messenger.showSnackBar(
+                      const SnackBar(content: Text('Saved! ESP32 is connecting to the new Wi-Fi & syncing via HiveMQ Cloud.')),
+                    );
+                  } catch (e) {
+                    messenger.showSnackBar(
+                      const SnackBar(content: Text('Tip: If switching away from old Wi-Fi, connect phone to "ESP32_UV_WiFi_Setup" AP (IP 192.168.4.1) first.')),
+                    );
+                  }
+                },
+                child: const Text('Connect ESP32'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
   }
 
   Color _getRiskColor(double uvi) {
@@ -838,52 +920,44 @@ from(bucket: "$_influxBucket")
 
   @override
   Widget build(BuildContext context) {
-    final double activeMv =
-        _latestRecord?.getMvByFilter(_selectedFilter) ?? 0.0;
-    final double activeUvi =
-        GuvaCalibrationEngine.calculateCalibratedUVI(activeMv);
+    final double activeMv = _latestRecord?.getMvByFilter(_selectedFilter) ?? 0.0;
+    final double activeUvi = GuvaCalibrationEngine.calculateCalibratedUVI(activeMv);
     final int discreteUvi = GuvaCalibrationEngine.lookupDiscreteUVI(activeMv);
-    final double oldLinearUvi =
-        GuvaCalibrationEngine.calculateOldLinearUVI(activeMv);
+    final double oldLinearUvi = GuvaCalibrationEngine.calculateOldLinearUVI(activeMv);
     final String activeRisk = GuvaCalibrationEngine.getRiskCategory(activeUvi);
     final Color activeColor = _getRiskColor(activeUvi);
 
     final List<HourlyBucketStat> hourlyRanked = _get24HrDescendingList();
     final List<GranularTelemetryRow> granularRows = _getGranularityTableRows();
-
-    // Dynamic year options from 2020 to current year (expands automatically every year)
-    final int currentYear = max(2026, DateTime.now().year);
-    final List<int> yearOptions =
-        List<int>.generate((currentYear - 2020) + 1, (int i) => 2020 + i);
+    final List<ChartDataPoint> chartPoints = _getAggregatedChartPoints();
+    
+    final int currentYear = DateTime.now().year;
+    final List<int> yearOptions = List<int>.generate((currentYear - 2020) + 1, (int i) => 2020 + i);
     final int maxDays = _daysInMonth(_selectedYear, _selectedMonth);
     if (_selectedDay > maxDays) _selectedDay = maxDays;
 
     return Scaffold(
       appBar: AppBar(
         backgroundColor: const Color(0xFF131B2E),
-        title: const Text(
-          'UV Calibration, Filter Lab & Cloud Hub',
-          style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15),
-        ),
+        title: const Text('UV Calibration, Filter Lab & Cloud Hub', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15)),
         actions: <Widget>[
           IconButton(
-            tooltip: 'Sync Now with InfluxDB & Grafana Database',
-            icon: const Icon(Icons.cloud_sync_rounded, color: Color(0xFF00F5D4)),
+            tooltip: 'Connect ESP32 to Any Wi-Fi / Hotspot',
+            icon: const Icon(Icons.wifi_password_rounded, color: Color(0xFF00F5D4)),
+            onPressed: _showPhoneStyleWiFiDialog,
+          ),
+          IconButton(
+            tooltip: 'Force Sync InfluxDB Database',
+            icon: const Icon(Icons.cloud_sync_rounded, color: Color(0xFFF15BB5)),
             onPressed: _syncFromInfluxDbCloud,
           ),
           TextButton.icon(
             onPressed: _toggleDemoStream,
             icon: Icon(
               _isSimulating ? Icons.stop_circle : Icons.science_rounded,
-              color: _isSimulating
-                  ? const Color(0xFFFF0055)
-                  : const Color(0xFFFEE440),
+              color: _isSimulating ? const Color(0xFFFF0055) : const Color(0xFFFEE440),
             ),
-            label: Text(
-              _isSimulating ? 'Stop' : 'Demo',
-              style: const TextStyle(
-                  color: Colors.white, fontWeight: FontWeight.bold),
-            ),
+            label: Text(_isSimulating ? 'Stop' : 'Demo', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
           ),
         ],
       ),
@@ -893,7 +967,7 @@ from(bucket: "$_influxBucket")
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              // ================= CONNECTION & CLOUD STATUS BAR =================
+              // ================= CLOUD CONNECTION PANEL =================
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
@@ -908,20 +982,13 @@ from(bucket: "$_influxBucket")
                         Expanded(
                           child: TextField(
                             controller: _ipController,
-                            style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13),
+                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
                             decoration: InputDecoration(
-                              labelText: 'ESP32 Local IP (Direct HTTP + Cloud)',
-                              prefixIcon: const Icon(Icons.router_rounded,
-                                  color: Color(0xFF00F5D4), size: 18),
+                              labelText: 'ESP32 Local IP (or 192.168.4.1 Setup)',
+                              prefixIcon: const Icon(Icons.router_rounded, color: Color(0xFF00F5D4), size: 18),
                               filled: true,
                               fillColor: const Color(0xFF0B0F19),
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(10),
-                                borderSide: BorderSide.none,
-                              ),
+                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
                               isDense: true,
                             ),
                           ),
@@ -929,19 +996,12 @@ from(bucket: "$_influxBucket")
                         const SizedBox(width: 8),
                         ElevatedButton(
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: _isConnected
-                                ? const Color(0xFFFF0055)
-                                : const Color(0xFF00F5D4),
-                            foregroundColor:
-                                _isConnected ? Colors.white : Colors.black,
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 16, vertical: 14),
+                            backgroundColor: _isConnected ? const Color(0xFFFF0055) : const Color(0xFF00F5D4),
+                            foregroundColor: _isConnected ? Colors.white : Colors.black,
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                           ),
                           onPressed: _toggleConnection,
-                          child: Text(
-                            _isConnected ? 'Stop' : 'Connect',
-                            style: const TextStyle(fontWeight: FontWeight.w900),
-                          ),
+                          child: Text(_isConnected ? 'Stop' : 'Connect', style: const TextStyle(fontWeight: FontWeight.w900)),
                         ),
                       ],
                     ),
@@ -950,57 +1010,38 @@ from(bucket: "$_influxBucket")
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: <Widget>[
                         Expanded(
-                          child: Text(_status,
-                              style: const TextStyle(
-                                  fontSize: 11, color: Colors.white70),
-                              overflow: TextOverflow.ellipsis),
+                          child: Text(_status, style: const TextStyle(fontSize: 11, color: Colors.white70), overflow: TextOverflow.ellipsis),
                         ),
                         Row(
                           children: <Widget>[
                             Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 6, vertical: 3),
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
                               decoration: BoxDecoration(
-                                color: (_isInfluxCloudConnected
-                                        ? const Color(0xFF00BBF9)
-                                        : Colors.orange)
-                                    .withOpacity(0.15),
+                                color: (_isInfluxCloudConnected ? const Color(0xFF00BBF9) : Colors.orange).withOpacity(0.15),
                                 borderRadius: BorderRadius.circular(6),
                               ),
                               child: Text(
-                                _isInfluxCloudConnected
-                                    ? 'InfluxDB: SYNCED'
-                                    : 'InfluxDB: Syncing',
+                                _isInfluxCloudConnected ? 'InfluxDB: SYNCED' : 'InfluxDB: Wait',
                                 style: TextStyle(
                                   fontSize: 9,
                                   fontWeight: FontWeight.bold,
-                                  color: _isInfluxCloudConnected
-                                      ? const Color(0xFF00BBF9)
-                                      : Colors.orangeAccent,
+                                  color: _isInfluxCloudConnected ? const Color(0xFF00BBF9) : Colors.orangeAccent,
                                 ),
                               ),
                             ),
                             const SizedBox(width: 6),
                             Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 6, vertical: 3),
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
                               decoration: BoxDecoration(
-                                color: (_isMqttCloudConnected
-                                        ? const Color(0xFF00F5D4)
-                                        : Colors.orange)
-                                    .withOpacity(0.15),
+                                color: (_isMqttCloudConnected ? const Color(0xFF00F5D4) : Colors.orange).withOpacity(0.15),
                                 borderRadius: BorderRadius.circular(6),
                               ),
                               child: Text(
-                                _isMqttCloudConnected
-                                    ? 'HiveMQ: ONLINE'
-                                    : 'HiveMQ: Wait',
+                                _isMqttCloudConnected ? 'HiveMQ: ONLINE' : 'HiveMQ: Wait',
                                 style: TextStyle(
                                   fontSize: 9,
                                   fontWeight: FontWeight.bold,
-                                  color: _isMqttCloudConnected
-                                      ? const Color(0xFF00F5D4)
-                                      : Colors.orangeAccent,
+                                  color: _isMqttCloudConnected ? const Color(0xFF00F5D4) : Colors.orangeAccent,
                                 ),
                               ),
                             ),
@@ -1011,12 +1052,9 @@ from(bucket: "$_influxBucket")
                     const Divider(color: Colors.white12, height: 16),
                     Row(
                       children: <Widget>[
-                        const Icon(Icons.tune_rounded,
-                            color: Color(0xFFFEE440), size: 18),
+                        const Icon(Icons.tune_rounded, color: Color(0xFFFEE440), size: 18),
                         const SizedBox(width: 6),
-                        const Text('Active Filter:',
-                            style: TextStyle(
-                                fontSize: 12, fontWeight: FontWeight.bold)),
+                        const Text('Active Filter:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
                         const SizedBox(width: 8),
                         Expanded(
                           child: DropdownButtonHideUnderline(
@@ -1024,20 +1062,12 @@ from(bucket: "$_influxBucket")
                               value: _selectedFilter,
                               isExpanded: true,
                               dropdownColor: const Color(0xFF1E293B),
-                              items: _filterOptions
-                                  .map((String f) => DropdownMenuItem<String>(
-                                        value: f,
-                                        child: Text(f,
-                                            style: const TextStyle(
-                                                fontSize: 12,
-                                                color: Color(0xFF00F5D4),
-                                                fontWeight: FontWeight.bold)),
-                                      ))
-                                  .toList(),
+                              items: _filterOptions.map((String f) => DropdownMenuItem<String>(
+                                value: f,
+                                child: Text(f, style: const TextStyle(fontSize: 12, color: Color(0xFF00F5D4), fontWeight: FontWeight.bold)),
+                              )).toList(),
                               onChanged: (String? val) {
-                                if (val != null) {
-                                  setState(() => _selectedFilter = val);
-                                }
+                                if (val != null) setState(() => _selectedFilter = val);
                               },
                             ),
                           ),
@@ -1045,8 +1075,7 @@ from(bucket: "$_influxBucket")
                         Checkbox(
                           value: _overlayRawOnChart,
                           activeColor: const Color(0xFFFF0055),
-                          onChanged: (bool? v) =>
-                              setState(() => _overlayRawOnChart = v ?? true),
+                          onChanged: (bool? v) => setState(() => _overlayRawOnChart = v ?? true),
                         ),
                         const Text('vs Raw', style: TextStyle(fontSize: 11)),
                       ],
@@ -1055,42 +1084,20 @@ from(bucket: "$_influxBucket")
                 ),
               ),
               const SizedBox(height: 12),
-
-              // ================= TOP 3 KPI CARDS =================
+              
+              // ================= KPI CARDS =================
               Row(
                 children: <Widget>[
-                  Expanded(
-                    child: _metricCard(
-                      title: 'Filtered Voltage',
-                      value: '${activeMv.toStringAsFixed(1)} mV',
-                      sub:
-                          'Raw: ${(_latestRecord?.mvRaw ?? 0).toStringAsFixed(1)} mV',
-                      accent: const Color(0xFF00BBF9),
-                    ),
-                  ),
+                  Expanded(child: _metricCard(title: 'Filtered Voltage', value: '${activeMv.toStringAsFixed(1)} mV', sub: 'Raw: ${(_latestRecord?.mvRaw ?? 0).toStringAsFixed(1)} mV', accent: const Color(0xFF00BBF9))),
                   const SizedBox(width: 8),
-                  Expanded(
-                    child: _metricCard(
-                      title: 'Calibrated UVI',
-                      value: activeUvi.toStringAsFixed(2),
-                      sub: 'Lookup Step: $discreteUvi',
-                      accent: activeColor,
-                    ),
-                  ),
+                  Expanded(child: _metricCard(title: 'Calibrated UVI', value: activeUvi.toStringAsFixed(2), sub: 'Lookup Step: $discreteUvi', accent: activeColor)),
                   const SizedBox(width: 8),
-                  Expanded(
-                    child: _metricCard(
-                      title: 'WHO Risk Category',
-                      value: activeRisk,
-                      sub: 'Old Lin: ${oldLinearUvi.toStringAsFixed(2)}',
-                      accent: const Color(0xFFF15BB5),
-                    ),
-                  ),
+                  Expanded(child: _metricCard(title: 'WHO Risk Category', value: activeRisk, sub: 'Old Lin: ${oldLinearUvi.toStringAsFixed(2)}', accent: const Color(0xFFF15BB5))),
                 ],
               ),
               const SizedBox(height: 12),
-
-              // ================= 3-FILTER JITTER COMPARISON STRIP =================
+              
+              // ================= FILTER JITTER STRIP =================
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
@@ -1101,55 +1108,29 @@ from(bucket: "$_influxBucket")
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
-                    const Text(
-                      'Live Filter Noise Jitter Comparison (Lower σ = Cleaner Signal):',
-                      style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFFFEE440)),
-                    ),
+                    const Text('Live Filter Noise Jitter Comparison (Lower σ = Cleaner Signal):', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFFFEE440))),
                     const SizedBox(height: 6),
                     SingleChildScrollView(
                       scrollDirection: Axis.horizontal,
                       child: Row(
                         children: _filterOptions.map((String fName) {
                           final double sigma = _calcFilterStdDev(fName);
-                          final double val =
-                              _latestRecord?.getMvByFilter(fName) ?? 0.0;
+                          final double val = _latestRecord?.getMvByFilter(fName) ?? 0.0;
                           final bool isSelected = _selectedFilter == fName;
-                          return GestureDetector(
-                            onTap: () =>
-                                setState(() => _selectedFilter = fName),
-                            child: Container(
-                              margin: const EdgeInsets.only(right: 8),
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 10, vertical: 6),
-                              decoration: BoxDecoration(
-                                color: isSelected
-                                    ? const Color(0xFF00F5D4).withOpacity(0.15)
-                                    : const Color(0xFF0B0F19),
-                                borderRadius: BorderRadius.circular(8),
-                                border: Border.all(
-                                  color: isSelected
-                                      ? const Color(0xFF00F5D4)
-                                      : Colors.white12,
-                                ),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: <Widget>[
-                                  Text(fName,
-                                      style: const TextStyle(
-                                          fontSize: 10,
-                                          fontWeight: FontWeight.bold)),
-                                  Text(
-                                    '${val.toStringAsFixed(1)} mV  (σ=${sigma.toStringAsFixed(2)})',
-                                    style: const TextStyle(
-                                        fontSize: 10,
-                                        color: Color(0xFF00F5D4)),
-                                  ),
-                                ],
-                              ),
+                          return Container(
+                            margin: const EdgeInsets.only(right: 8),
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: isSelected ? const Color(0xFF00F5D4).withOpacity(0.15) : const Color(0xFF0B0F19),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: isSelected ? const Color(0xFF00F5D4) : Colors.white12),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: <Widget>[
+                                Text(fName, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
+                                Text('${val.toStringAsFixed(1)} mV  (σ=${sigma.toStringAsFixed(2)})', style: const TextStyle(fontSize: 10, color: Color(0xFF00F5D4))),
+                              ],
                             ),
                           );
                         }).toList(),
@@ -1159,128 +1140,127 @@ from(bucket: "$_influxBucket")
                 ),
               ),
               const SizedBox(height: 14),
-
-              // ================= LIVE UV GRAPH + PNG EXPORT =================
+              
+              // ================= SCROLLABLE DYNAMIC GRAPH =================
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: <Widget>[
-                  const Text(
-                    'Live UV Index Graph (Filtered vs Unfiltered)',
-                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800),
-                  ),
-                  TextButton.icon(
-                    onPressed: _downloadGraphPng,
-                    icon: const Icon(Icons.download_for_offline_rounded,
-                        size: 16, color: Color(0xFF00F5D4)),
-                    label: const Text('Download Graph PNG',
-                        style:
-                            TextStyle(fontSize: 11, color: Color(0xFF00F5D4))),
+                  const Text('UV Index History Graph', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800)),
+                  Row(
+                    children: <Widget>[
+                      Container(
+                        height: 30,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF151F32),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: const Color(0xFF00BBF9)),
+                        ),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<String>(
+                            value: _chartGranularity,
+                            dropdownColor: const Color(0xFF1E293B),
+                            items: <String>['Seconds', 'Minutes', 'Hours', 'Days', 'Months', 'Years']
+                                .map((String unit) => DropdownMenuItem<String>(
+                                      value: unit,
+                                      child: Text(unit, style: const TextStyle(fontSize: 11, color: Color(0xFF00BBF9), fontWeight: FontWeight.bold)),
+                                    ))
+                                .toList(),
+                            onChanged: (String? v) {
+                              if (v != null) setState(() => _chartGranularity = v);
+                            },
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      IconButton(
+                        onPressed: _downloadGraphPng,
+                        icon: const Icon(Icons.download_for_offline_rounded, size: 20, color: Color(0xFF00F5D4)),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                      ),
+                    ],
                   ),
                 ],
               ),
+              const SizedBox(height: 8),
               RepaintBoundary(
                 key: _chartBoundaryKey,
                 child: Container(
-                  height: 210,
-                  padding: const EdgeInsets.fromLTRB(8, 16, 16, 8),
+                  height: 230,
+                  width: double.infinity,
                   decoration: BoxDecoration(
                     color: const Color(0xFF151F32),
                     borderRadius: BorderRadius.circular(14),
                     border: Border.all(color: Colors.white10),
                   ),
-                  child: _liveRecords.isEmpty
+                  child: chartPoints.isEmpty
                       ? const Center(
-                          child: Text(
-                            'Waiting for live stream from HiveMQ / InfluxDB / ESP32...',
-                            style:
-                                TextStyle(color: Colors.white54, fontSize: 12),
-                          ),
+                          child: Text('No data for selected period.', style: TextStyle(color: Colors.white54, fontSize: 12)),
                         )
-                      : LineChart(
-                          LineChartData(
-                            gridData: FlGridData(
-                              show: true,
-                              drawVerticalLine: false,
-                              getDrawingHorizontalLine: (double v) => FlLine(
-                                  color: Colors.white.withOpacity(0.06),
-                                  strokeWidth: 1),
-                            ),
-                            borderData: FlBorderData(show: false),
-                            titlesData: FlTitlesData(
-                              topTitles: const AxisTitles(
-                                  sideTitles: SideTitles(showTitles: false)),
-                              rightTitles: const AxisTitles(
-                                  sideTitles: SideTitles(showTitles: false)),
-                              bottomTitles: AxisTitles(
-                                sideTitles: SideTitles(
-                                  showTitles: true,
-                                  reservedSize: 22,
-                                  interval: (_liveRecords.length > 5)
-                                      ? (_liveRecords.length / 4)
-                                          .floorToDouble()
-                                      : 1,
-                                  getTitlesWidget:
-                                      (double val, TitleMeta meta) {
-                                    final int idx = val.toInt();
-                                    if (idx >= 0 && idx < _liveRecords.length) {
-                                      return Padding(
-                                        padding:
-                                            const EdgeInsets.only(top: 5.0),
-                                        child: Text(
-                                          DateFormat('HH:mm:ss').format(
-                                              _liveRecords[idx].timestamp),
-                                          style: const TextStyle(
-                                              fontSize: 9,
-                                              color: Colors.white60),
-                                        ),
-                                      );
-                                    }
-                                    return const SizedBox.shrink();
-                                  },
+                      : SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          reverse: true, // Auto-scroll to the latest data on the right
+                          child: Container(
+                            padding: const EdgeInsets.fromLTRB(8, 20, 16, 8),
+                            // Make the graph wide enough to fit all points (min 40 pixels per point), but at least the screen width
+                            width: max(MediaQuery.of(context).size.width - 24, chartPoints.length * 40.0),
+                            child: LineChart(
+                              LineChartData(
+                                gridData: FlGridData(
+                                  show: true,
+                                  drawVerticalLine: false,
+                                  getDrawingHorizontalLine: (double v) => FlLine(color: Colors.white.withOpacity(0.06), strokeWidth: 1),
                                 ),
+                                borderData: FlBorderData(show: false),
+                                titlesData: FlTitlesData(
+                                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                                  bottomTitles: AxisTitles(
+                                    sideTitles: SideTitles(
+                                      showTitles: true,
+                                      reservedSize: 22,
+                                      interval: 1, // Show every label since we scroll horizontally now
+                                      getTitlesWidget: (double val, TitleMeta meta) {
+                                        final int idx = val.toInt();
+                                        if (idx >= 0 && idx < chartPoints.length) {
+                                          return Padding(
+                                            padding: const EdgeInsets.only(top: 5.0),
+                                            child: Text(chartPoints[idx].label, style: const TextStyle(fontSize: 9, color: Colors.white60)),
+                                          );
+                                        }
+                                        return const SizedBox.shrink();
+                                      },
+                                    ),
+                                  ),
+                                ),
+                                lineBarsData: <LineChartBarData>[
+                                  if (_overlayRawOnChart)
+                                    LineChartBarData(
+                                      spots: chartPoints.asMap().entries.map((MapEntry<int, ChartDataPoint> e) => FlSpot(e.key.toDouble(), e.value.uviRaw)).toList(),
+                                      isCurved: false,
+                                      color: const Color(0xFFFF0055).withOpacity(0.55),
+                                      barWidth: 1.5,
+                                      dashArray: <int>[4, 4],
+                                      dotData: const FlDotData(show: false),
+                                    ),
+                                  LineChartBarData(
+                                    spots: chartPoints.asMap().entries.map((MapEntry<int, ChartDataPoint> e) => FlSpot(e.key.toDouble(), e.value.uviFiltered)).toList(),
+                                    isCurved: true,
+                                    color: activeColor,
+                                    barWidth: 3.0,
+                                    dotData: FlDotData(show: chartPoints.length < 50), // Hide dots if too cramped
+                                  ),
+                                ],
                               ),
                             ),
-                            lineBarsData: <LineChartBarData>[
-                              if (_overlayRawOnChart)
-                                LineChartBarData(
-                                  spots: _liveRecords
-                                      .asMap()
-                                      .entries
-                                      .map((MapEntry<int, UVRecord> e) => FlSpot(
-                                          e.key.toDouble(),
-                                          GuvaCalibrationEngine
-                                              .calculateCalibratedUVI(
-                                                  e.value.mvRaw)))
-                                      .toList(),
-                                  isCurved: false,
-                                  color:
-                                      const Color(0xFFFF0055).withOpacity(0.55),
-                                  barWidth: 1.5,
-                                  dashArray: <int>[4, 4],
-                                  dotData: const FlDotData(show: false),
-                                ),
-                              LineChartBarData(
-                                spots: _liveRecords
-                                    .asMap()
-                                    .entries
-                                    .map((MapEntry<int, UVRecord> e) => FlSpot(
-                                        e.key.toDouble(),
-                                        e.value
-                                            .getUviByFilter(_selectedFilter)))
-                                    .toList(),
-                                isCurved: true,
-                                color: activeColor,
-                                barWidth: 3.0,
-                                dotData: const FlDotData(show: true),
-                              ),
-                            ],
                           ),
                         ),
                 ),
               ),
               const SizedBox(height: 16),
-
-              // ================= DATE / WEEK / MONTH / YEAR DROPDOWNS =================
+              
+              // ================= PERIOD MASTER FILTER =================
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
@@ -1291,40 +1271,27 @@ from(bucket: "$_influxBucket")
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
-                    const Text(
-                      'Select Filter Period (Date / Week 1–5 / Month Jan–Dec / Year 2020–Present)',
-                      style:
-                          TextStyle(fontSize: 12, fontWeight: FontWeight.w800),
-                    ),
+                    const Text('Select the Period (Filters Graph & Table Below)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800)),
                     const SizedBox(height: 8),
                     Row(
-                      children: <String>['Date', 'Week', 'Month', 'Year']
-                          .map((String mode) {
+                      children: <String>['Date', 'Week', 'Month', 'Year'].map((String mode) {
                         final bool selected = _periodMode == mode;
                         return Expanded(
                           child: Padding(
-                            padding:
-                                const EdgeInsets.symmetric(horizontal: 2.0),
+                            padding: const EdgeInsets.symmetric(horizontal: 2.0),
                             child: ChoiceChip(
                               label: SizedBox(
                                 width: double.infinity,
                                 child: Text(
                                   mode,
                                   textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.bold,
-                                    color: selected
-                                        ? Colors.black
-                                        : Colors.white70,
-                                  ),
+                                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: selected ? Colors.black : Colors.white70),
                                 ),
                               ),
                               selected: selected,
                               selectedColor: const Color(0xFF00F5D4),
                               backgroundColor: const Color(0xFF0B0F19),
-                              onSelected: (bool _) =>
-                                  setState(() => _periodMode = mode),
+                              onSelected: (bool _) => setState(() => _periodMode = mode),
                             ),
                           ),
                         );
@@ -1335,62 +1302,32 @@ from(bucket: "$_influxBucket")
                       spacing: 8,
                       runSpacing: 8,
                       children: <Widget>[
-                        // Year Dropdown (2020 to Present, auto-adds future years)
                         _buildDropdownChip<int>(
                           label: 'Year',
                           value: _selectedYear,
-                          items: yearOptions
-                              .map((int y) => DropdownMenuItem<int>(
-                                  value: y, child: Text('$y')))
-                              .toList(),
-                          onChanged: (int? val) => setState(
-                              () => _selectedYear = val ?? currentYear),
+                          items: yearOptions.map((int y) => DropdownMenuItem<int>(value: y, child: Text('$y'))).toList(),
+                          onChanged: (int? val) => setState(() => _selectedYear = val ?? currentYear),
                         ),
-                        // Month Dropdown (Jan - Dec)
                         if (_periodMode != 'Year')
                           _buildDropdownChip<int>(
                             label: 'Month',
                             value: _selectedMonth,
-                            items: List<DropdownMenuItem<int>>.generate(
-                              12,
-                              (int i) => DropdownMenuItem<int>(
-                                value: i + 1,
-                                child: Text(_monthNames[i]),
-                              ),
-                            ),
-                            onChanged: (int? val) =>
-                                setState(() => _selectedMonth = val ?? 1),
+                            items: List<DropdownMenuItem<int>>.generate(12, (int i) => DropdownMenuItem<int>(value: i + 1, child: Text(_monthNames[i]))),
+                            onChanged: (int? val) => setState(() => _selectedMonth = val ?? 1),
                           ),
-                        // Week Dropdown (Week 1 - Week 5)
                         if (_periodMode == 'Week')
                           _buildDropdownChip<int>(
                             label: 'Week',
                             value: _selectedWeek,
-                            items: List<DropdownMenuItem<int>>.generate(
-                              5,
-                              (int i) => DropdownMenuItem<int>(
-                                value: i + 1,
-                                child: Text('Week ${i + 1}'),
-                              ),
-                            ),
-                            onChanged: (int? val) =>
-                                setState(() => _selectedWeek = val ?? 1),
+                            items: List<DropdownMenuItem<int>>.generate(5, (int i) => DropdownMenuItem<int>(value: i + 1, child: Text('Week ${i + 1}'))),
+                            onChanged: (int? val) => setState(() => _selectedWeek = val ?? 1),
                           ),
-                        // Individual Date Dropdown of that respective month
                         if (_periodMode == 'Date')
                           _buildDropdownChip<int>(
                             label: 'Date',
                             value: _selectedDay,
-                            items: List<DropdownMenuItem<int>>.generate(
-                              maxDays,
-                              (int i) => DropdownMenuItem<int>(
-                                value: i + 1,
-                                child: Text(
-                                    '${i + 1} ${_monthNames[_selectedMonth - 1]}'),
-                              ),
-                            ),
-                            onChanged: (int? val) =>
-                                setState(() => _selectedDay = val ?? 1),
+                            items: List<DropdownMenuItem<int>>.generate(maxDays, (int i) => DropdownMenuItem<int>(value: i + 1, child: Text('${i + 1} ${_monthNames[_selectedMonth - 1]}'))),
+                            onChanged: (int? val) => setState(() => _selectedDay = val ?? 1),
                           ),
                       ],
                     ),
@@ -1398,21 +1335,14 @@ from(bucket: "$_influxBucket")
                 ),
               ),
               const SizedBox(height: 16),
-
-              // ================= 24-HOUR DESCENDING RANKING =================
-              Text(
-                '24-Hour UV Ranking for $_selectedDay ${_monthNames[_selectedMonth - 1]} $_selectedYear (Descending Order)',
-                style:
-                    const TextStyle(fontSize: 13, fontWeight: FontWeight.w800),
-              ),
+              
+              // ================= 24-HOUR RANKING =================
+              Text('24-Hour UV Ranking for $_selectedDay ${_monthNames[_selectedMonth - 1]} $_selectedYear (Descending Order)', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800)),
               const SizedBox(height: 4),
-              const Text(
-                'Highest UV radiation hour is highlighted dark at the front; ordered from highest to lowest.',
-                style: TextStyle(fontSize: 10, color: Colors.white54),
-              ),
+              const Text('Highest UV radiation hour is highlighted dark at the front; ordered from highest to lowest.', style: TextStyle(fontSize: 10, color: Colors.white54)),
               const SizedBox(height: 8),
               Container(
-                height: 240,
+                height: 230,
                 decoration: BoxDecoration(
                   color: const Color(0xFF151F32),
                   borderRadius: BorderRadius.circular(14),
@@ -1423,33 +1353,16 @@ from(bucket: "$_influxBucket")
                   itemBuilder: (BuildContext ctx, int idx) {
                     final HourlyBucketStat hr = hourlyRanked[idx];
                     final double peakUvi = hr.peakUvi;
-                    final bool isHighestHour = idx == 0;
+                    final bool isHighestHour = idx == 0 && peakUvi > 0;
 
                     return Container(
-                      margin: EdgeInsets.fromLTRB(
-                          8, isHighestHour ? 8 : 3, 8, isHighestHour ? 6 : 3),
-                      padding: EdgeInsets.symmetric(
-                          horizontal: 12, vertical: isHighestHour ? 13 : 9),
+                      margin: EdgeInsets.fromLTRB(8, isHighestHour ? 8 : 3, 8, isHighestHour ? 6 : 3),
+                      padding: EdgeInsets.symmetric(horizontal: 12, vertical: isHighestHour ? 13 : 9),
                       decoration: BoxDecoration(
-                        color: isHighestHour
-                            ? const Color(0xFF04060A)
-                            : const Color(0xFF1E293B).withOpacity(0.45),
+                        color: isHighestHour ? const Color(0xFF04060A) : const Color(0xFF1E293B).withOpacity(0.45),
                         borderRadius: BorderRadius.circular(10),
-                        border: Border.all(
-                          color: isHighestHour
-                              ? const Color(0xFFFF0055)
-                              : Colors.white10,
-                          width: isHighestHour ? 2.0 : 0.8,
-                        ),
-                        boxShadow: isHighestHour
-                            ? <BoxShadow>[
-                                BoxShadow(
-                                  color:
-                                      const Color(0xFFFF0055).withOpacity(0.28),
-                                  blurRadius: 8,
-                                )
-                              ]
-                            : <BoxShadow>[],
+                        border: Border.all(color: isHighestHour ? const Color(0xFFFF0055) : Colors.white10, width: isHighestHour ? 2.0 : 0.8),
+                        boxShadow: isHighestHour ? <BoxShadow>[BoxShadow(color: const Color(0xFFFF0055).withOpacity(0.25), blurRadius: 8)] : <BoxShadow>[],
                       ),
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1457,46 +1370,23 @@ from(bucket: "$_influxBucket")
                           Row(
                             children: <Widget>[
                               Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 7, vertical: 3),
-                                decoration: BoxDecoration(
-                                  color: isHighestHour
-                                      ? const Color(0xFFFF0055)
-                                      : Colors.white10,
-                                  borderRadius: BorderRadius.circular(6),
-                                ),
+                                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                                decoration: BoxDecoration(color: isHighestHour ? const Color(0xFFFF0055) : Colors.white10, borderRadius: BorderRadius.circular(6)),
                                 child: Text(
-                                  isHighestHour
-                                      ? '★ #1 HIGHEST HOUR'
-                                      : '#${idx + 1}',
-                                  style: TextStyle(
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.w900,
-                                    color: isHighestHour
-                                        ? Colors.white
-                                        : Colors.white70,
-                                  ),
+                                  isHighestHour ? '★ #1 HIGHEST HOUR' : '#${idx + 1}',
+                                  style: TextStyle(fontSize: 10, fontWeight: FontWeight.w900, color: isHighestHour ? Colors.white : Colors.white70),
                                 ),
                               ),
                               const SizedBox(width: 10),
                               Text(
                                 hr.timeSlot,
-                                style: TextStyle(
-                                  fontWeight: isHighestHour
-                                      ? FontWeight.w900
-                                      : FontWeight.w600,
-                                  fontSize: isHighestHour ? 13 : 12,
-                                ),
+                                style: TextStyle(fontWeight: isHighestHour ? FontWeight.w900 : FontWeight.w600, fontSize: isHighestHour ? 13 : 12),
                               ),
                             ],
                           ),
                           Text(
                             'UVI: ${peakUvi.toStringAsFixed(2)} | ${hr.avgMv.toStringAsFixed(1)} mV',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.bold,
-                              color: _getRiskColor(peakUvi),
-                            ),
+                            style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: _getRiskColor(peakUvi)),
                           ),
                         ],
                       ),
@@ -1505,15 +1395,12 @@ from(bucket: "$_influxBucket")
                 ),
               ),
               const SizedBox(height: 16),
-
-              // ================= TELEMETRY TABLE (SECONDS / MINUTES / HOURS / DAY) =================
+              
+              // ================= TELEMETRY TABLE =================
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: <Widget>[
-                  const Text(
-                    'Telemetry Data (Time, UV Data, Voltage)',
-                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800),
-                  ),
+                  const Text('Telemetry Data Table', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800)),
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8),
                     decoration: BoxDecoration(
@@ -1528,11 +1415,7 @@ from(bucket: "$_influxBucket")
                         items: <String>['Seconds', 'Minutes', 'Hours', 'Day']
                             .map((String unit) => DropdownMenuItem<String>(
                                   value: unit,
-                                  child: Text(unit,
-                                      style: const TextStyle(
-                                          fontSize: 12,
-                                          color: Color(0xFF00F5D4),
-                                          fontWeight: FontWeight.bold)),
+                                  child: Text(unit, style: const TextStyle(fontSize: 12, color: Color(0xFF00F5D4), fontWeight: FontWeight.bold)),
                                 ))
                             .toList(),
                         onChanged: (String? v) {
@@ -1545,7 +1428,7 @@ from(bucket: "$_influxBucket")
               ),
               const SizedBox(height: 8),
               Container(
-                height: 220,
+                height: 210,
                 width: double.infinity,
                 decoration: BoxDecoration(
                   color: const Color(0xFF151F32),
@@ -1554,10 +1437,7 @@ from(bucket: "$_influxBucket")
                 ),
                 child: granularRows.isEmpty
                     ? const Center(
-                        child: Text(
-                          'No telemetry records for this selection yet.',
-                          style: TextStyle(color: Colors.white54, fontSize: 12),
-                        ),
+                        child: Text('No telemetry records for this selection yet.', style: TextStyle(color: Colors.white54, fontSize: 12)),
                       )
                     : SingleChildScrollView(
                         scrollDirection: Axis.vertical,
@@ -1570,17 +1450,9 @@ from(bucket: "$_influxBucket")
                           ],
                           rows: granularRows.map((GranularTelemetryRow row) {
                             return DataRow(cells: <DataCell>[
-                              DataCell(Text(row.time,
-                                  style: const TextStyle(fontSize: 11))),
-                              DataCell(Text(row.uvData,
-                                  style: const TextStyle(
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.bold,
-                                      color: Color(0xFF00F5D4)))),
-                              DataCell(Text(row.voltage,
-                                  style: const TextStyle(
-                                      fontSize: 11,
-                                      color: Colors.amberAccent))),
+                              DataCell(Text(row.time, style: const TextStyle(fontSize: 11))),
+                              DataCell(Text(row.uvData, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF00F5D4)))),
+                              DataCell(Text(row.voltage, style: const TextStyle(fontSize: 11, color: Colors.amberAccent))),
                             ]);
                           }).toList(),
                         ),
@@ -1598,11 +1470,7 @@ from(bucket: "$_influxBucket")
                       ),
                       onPressed: _downloadGranularityCsv,
                       icon: const Icon(Icons.table_view_rounded, size: 18),
-                      label: Text(
-                        'Download $_timeGranularity CSV',
-                        style: const TextStyle(
-                            fontWeight: FontWeight.w900, fontSize: 11),
-                      ),
+                      label: Text('Download $_timeGranularity CSV', style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 11)),
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -1615,11 +1483,7 @@ from(bucket: "$_influxBucket")
                       ),
                       onPressed: _download3FilterComparisonCsv,
                       icon: const Icon(Icons.analytics_rounded, size: 18),
-                      label: const Text(
-                        '3-Filter Benchmark CSV',
-                        style: TextStyle(
-                            fontWeight: FontWeight.bold, fontSize: 11),
-                      ),
+                      label: const Text('3-Filter Benchmark CSV', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11)),
                     ),
                   ),
                 ],
@@ -1632,12 +1496,7 @@ from(bucket: "$_influxBucket")
     );
   }
 
-  Widget _metricCard({
-    required String title,
-    required String value,
-    required String sub,
-    required Color accent,
-  }) {
+  Widget _metricCard({required String title, required String value, required String sub, required Color accent}) {
     return Container(
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
@@ -1648,46 +1507,29 @@ from(bucket: "$_influxBucket")
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Text(title,
-              style: const TextStyle(color: Colors.white60, fontSize: 10)),
+          Text(title, style: const TextStyle(color: Colors.white60, fontSize: 10)),
           const SizedBox(height: 4),
-          Text(value,
-              style: TextStyle(
-                  color: accent, fontSize: 15, fontWeight: FontWeight.w900)),
+          Text(value, style: TextStyle(color: accent, fontSize: 15, fontWeight: FontWeight.w900)),
           const SizedBox(height: 2),
-          Text(sub,
-              style: const TextStyle(color: Colors.white54, fontSize: 9)),
+          Text(sub, style: const TextStyle(color: Colors.white54, fontSize: 9)),
         ],
       ),
     );
   }
 
-  Widget _buildDropdownChip<T>({
-    required String label,
-    required T value,
-    required List<DropdownMenuItem<T>> items,
-    required ValueChanged<T?> onChanged,
-  }) {
+  Widget _buildDropdownChip<T>({required String label, required T value, required List<DropdownMenuItem<T>> items, required ValueChanged<T?> onChanged}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-      decoration: BoxDecoration(
-        color: const Color(0xFF0B0F19),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.white12),
-      ),
+      decoration: BoxDecoration(color: const Color(0xFF0B0F19), borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.white12)),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          Text('$label: ',
-              style: const TextStyle(color: Colors.white60, fontSize: 11)),
+          Text('$label: ', style: const TextStyle(color: Colors.white60, fontSize: 11)),
           DropdownButtonHideUnderline(
             child: DropdownButton<T>(
               value: value,
               dropdownColor: const Color(0xFF1E293B),
-              style: const TextStyle(
-                  color: Color(0xFF00F5D4),
-                  fontSize: 12,
-                  fontWeight: FontWeight.bold),
+              style: const TextStyle(color: Color(0xFF00F5D4), fontSize: 12, fontWeight: FontWeight.bold),
               items: items,
               onChanged: onChanged,
             ),
