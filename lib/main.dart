@@ -81,8 +81,6 @@ class GuvaCalibrationEngine {
 class UVRecord {
   final DateTime timestamp;
   final double mvRaw;
-  final double mvMa;
-  final double mvEma;
   final double mvMedian;
   final double mvKalman;
   final double mvHybrid;
@@ -95,8 +93,6 @@ class UVRecord {
   UVRecord({
     required this.timestamp,
     required this.mvRaw,
-    required this.mvMa,
-    required this.mvEma,
     required this.mvMedian,
     required this.mvKalman,
     required this.mvHybrid,
@@ -109,12 +105,6 @@ class UVRecord {
 
   double getMvByFilter(String filterName) {
     switch (filterName) {
-      case 'Raw (No Filter)':
-        return mvRaw;
-      case 'Moving Average (MA)':
-        return mvMa;
-      case 'Exponential MA (EMA)':
-        return mvEma;
       case 'Median Filter':
         return mvMedian;
       case '1D Kalman Filter':
@@ -133,8 +123,6 @@ class UVRecord {
   Map<String, dynamic> toJson() => <String, dynamic>{
         'ts': timestamp.toIso8601String(),
         'raw': mvRaw,
-        'ma': mvMa,
-        'ema': mvEma,
         'med': mvMedian,
         'kal': mvKalman,
         'hyb': mvHybrid,
@@ -156,8 +144,6 @@ class UVRecord {
     return UVRecord(
       timestamp: DateTime.parse(json['ts'].toString()),
       mvRaw: raw,
-      mvMa: ((json['ma'] ?? hyb) as num).toDouble(),
-      mvEma: ((json['ema'] ?? hyb) as num).toDouble(),
       mvMedian: ((json['med'] ?? hyb) as num).toDouble(),
       mvKalman: ((json['kal'] ?? hyb) as num).toDouble(),
       mvHybrid: hyb,
@@ -230,13 +216,9 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     'Hybrid (Median+Kalman)',
     '1D Kalman Filter',
     'Median Filter',
-    'Exponential MA (EMA)',
-    'Moving Average (MA)',
-    'Raw (No Filter)',
   ];
 
   final List<double> _winBuf = <double>[];
-  double _emaState = 0.0;
   double _kalX = 0.0, _kalP = 1.0;
   double _hybX = 0.0, _hybP = 1.0;
 
@@ -373,26 +355,20 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
       final int rssi = int.tryParse((data['rssi_dbm'] ?? '0').toString()) ?? 0;
 
       if (data.containsKey('mv_hybrid')) {
-        final double ma = double.tryParse(data['mv_ma'].toString()) ?? raw;
-        final double ema = double.tryParse(data['mv_ema'].toString()) ?? raw;
         final double med = double.tryParse(data['mv_median'].toString()) ?? raw;
         final double kal = double.tryParse(data['mv_kalman'].toString()) ?? raw;
         final double hyb = double.tryParse(data['mv_hybrid'].toString()) ?? raw;
-        _recordSample(raw, ma, ema, med, kal, hyb, rssi, source: source);
+        _recordSample(raw, med, kal, hyb, rssi, source: source);
       } else {
-        _compute6FiltersLocallyAndRecord(raw, rssi, source: source);
+        _compute3FiltersLocallyAndRecord(raw, rssi, source: source);
       }
     } catch (_) {}
   }
 
-  void _compute6FiltersLocallyAndRecord(double raw, int rssi,
+  void _compute3FiltersLocallyAndRecord(double raw, int rssi,
       {required String source}) {
     _winBuf.add(raw);
     if (_winBuf.length > 9) _winBuf.removeAt(0);
-
-    final double ma =
-        _winBuf.reduce((double a, double b) => a + b) / _winBuf.length;
-    _emaState = _packetCount == 0 ? raw : (0.25 * raw) + (0.75 * _emaState);
 
     final List<double> sorted = List<double>.from(_winBuf)..sort();
     final double med = sorted[sorted.length ~/ 2];
@@ -409,13 +385,11 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     _hybX += hG * (med - _hybX);
     _hybP = (1.0 - hG) * _hybP;
 
-    _recordSample(raw, ma, _emaState, med, _kalX, _hybX, rssi, source: source);
+    _recordSample(raw, med, _kalX, _hybX, rssi, source: source);
   }
 
   void _recordSample(
     double raw,
-    double ma,
-    double ema,
     double med,
     double kal,
     double hyb,
@@ -432,8 +406,6 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     final UVRecord rec = UVRecord(
       timestamp: DateTime.now(),
       mvRaw: raw,
-      mvMa: ma,
-      mvEma: ema,
       mvMedian: med,
       mvKalman: kal,
       mvHybrid: hyb,
@@ -478,7 +450,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
     final double whiteNoise = (rng.nextDouble() - 0.5) * 30.0;
     final double wifiSpike = (rng.nextInt(4) == 0) ? 165.0 : 0.0;
     final double raw = (baseMv + whiteNoise + wifiSpike).clamp(20.0, 1250.0);
-    _compute6FiltersLocallyAndRecord(raw, -51,
+    _compute3FiltersLocallyAndRecord(raw, -51,
         source: 'Demo Noise Filter Test');
   }
 
@@ -559,8 +531,8 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
       ));
     }
 
-    list24.sort(
-        (HourlyBucketStat a, HourlyBucketStat b) => b.peakUvi.compareTo(a.peakUvi));
+    list24.sort((HourlyBucketStat a, HourlyBucketStat b) =>
+        b.peakUvi.compareTo(a.peakUvi));
     return list24;
   }
 
@@ -624,7 +596,7 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
         text: 'UV Sensor Data ($_timeGranularity Granularity)');
   }
 
-  Future<void> _download6FilterComparisonCsv() async {
+  Future<void> _download3FilterComparisonCsv() async {
     final List<UVRecord> list = _getFilteredRecords().isNotEmpty
         ? _getFilteredRecords()
         : _allHistoryRecords;
@@ -632,15 +604,13 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
 
     final StringBuffer csv = StringBuffer();
     csv.writeln(
-        'Timestamp,Raw_mV,MovingAvg_mV,EMA_mV,Median_mV,Kalman_mV,Hybrid_MedKal_mV,UVI_Calibrated,UVI_Lookup_Int,UVI_Linear_Old,Risk_Category');
+        'Timestamp,Raw_mV,Median_mV,Kalman_mV,Hybrid_MedKal_mV,UVI_Calibrated,UVI_Lookup_Int,UVI_Linear_Old,Risk_Category');
 
     final DateFormat df = DateFormat('yyyy-MM-dd HH:mm:ss');
     for (final UVRecord r in list) {
       csv.writeln(
         '${df.format(r.timestamp)},'
         '${r.mvRaw.toStringAsFixed(2)},'
-        '${r.mvMa.toStringAsFixed(2)},'
-        '${r.mvEma.toStringAsFixed(2)},'
         '${r.mvMedian.toStringAsFixed(2)},'
         '${r.mvKalman.toStringAsFixed(2)},'
         '${r.mvHybrid.toStringAsFixed(2)},'
@@ -653,10 +623,10 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
 
     final Directory dir = await getTemporaryDirectory();
     final File file = File(
-        '${dir.path}/uv_6filter_comparison_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv');
+        '${dir.path}/uv_3filter_comparison_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv');
     await file.writeAsString(csv.toString());
     await Share.shareXFiles(<XFile>[XFile(file.path)],
-        text: '6-Filter UV Comparison Dataset');
+        text: '3-Filter UV Comparison Dataset (Hybrid, Kalman, Median)');
   }
 
   Future<void> _downloadGraphPng() async {
@@ -1589,10 +1559,10 @@ class _UVMonitorScreenState extends State<UVMonitorScreen> {
                         foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(vertical: 12),
                       ),
-                      onPressed: _download6FilterComparisonCsv,
+                      onPressed: _download3FilterComparisonCsv,
                       icon: const Icon(Icons.analytics_rounded, size: 18),
                       label: const Text(
-                        '6-Filter Benchmark CSV',
+                        '3-Filter Benchmark CSV',
                         style: TextStyle(
                             fontWeight: FontWeight.bold, fontSize: 11),
                       ),
