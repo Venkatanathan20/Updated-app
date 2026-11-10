@@ -1,17 +1,15 @@
-# uv_sensor_updated_app
+﻿# ESP32-C3 Real-Time Physical UV Sensor Monitoring System
 
-A new Flutter project.
+High-precision, real-time IoT UV monitoring ecosystem featuring an ESP32-C3 microcontroller, GUVA-S12SD UV sensor, 3-tier digital signal processing (DSP), InfluxDB Cloud, Grafana dashboards, and a cross-platform Flutter mobile application.
 
-## Getting Started
-
-This project is a starting point for a Flutter application.
-
-A few resources to get you started if this is your first Flutter project:
-
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## System Architecture
+* **Edge Sensor Node:** ESP32-C3 reading analog voltage from GUVA-S12SD via `GPIO2` (ADC1_CH2).
+* **Signal Processing (DSP):** 
+  * 9-sample sliding window **Median Filter** (outlier/spike rejection).
+  * **1D Kalman Filter** (Gaussian noise reduction).
+  * **Hybrid Filter** (Median + Kalman cascaded for zero lag during rapid light shifts).
+* **Data Pipelines:**
+  * **MQTT Protocol:** Real-time JSON publishing via HiveMQ Cloud (`venkat_iot/sensors/uv/node_01`).
+  * **Time-Series Database:** InfluxDB Cloud (`uv_sensor_data` bucket, `uv_measurement` measurement).
+  * **Visualization:** Grafana Cloud (Stat gauges, 24h peaks, time-series voltage/UVI graphs, 7-day peak bar charts).
+  * **Mobile Control:** Flutter app supporting multi-period history (Date, Week, Month, Year), 24-hour descending UV ranking, and CSV/PNG data exports.

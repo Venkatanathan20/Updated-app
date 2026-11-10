@@ -1,8 +1,6 @@
-﻿#include <Arduino.h>
+#include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
-#include <DNSServer.h>
-#include <Preferences.h>
 #include <PubSubClient.h>
 #include <HTTPClient.h>
 #include <NetworkClientSecure.h>
@@ -11,34 +9,32 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-// ---------------- HARDWARE PIN DEFINITIONS ----------------
-#define UV_ADC_PIN       0   // GPIO0 (ADC1_CH0) for GUVA-S12SD
-#define OLED_SDA_PIN     8   // ESP32-C3 Default I2C SDA
-#define OLED_SCL_PIN     9   // ESP32-C3 Default I2C SCL
-#define SCREEN_WIDTH     128
-#define SCREEN_HEIGHT    64
+// ================= 1. WIFI & NETWORK CREDENTIALS =================
+const char* WIFI_SSID     = "Nokia";
+const char* WIFI_PASSWORD = "Password";
+
+// ================= 2. PIN DEFINITIONS ==================
+#define UV_SENSOR_PIN 2   // GUVA-S12SD SIG pin (ADC1_CH2)
+#define I2C_SDA_PIN   8   // OLED SDA pin
+#define I2C_SCL_PIN   9   // OLED SCL pin
+#define SCREEN_WIDTH  128
+#define SCREEN_HEIGHT 64
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
-bool oledAvailable = false;
-
-// ---------------- NETWORK & CLOUD CONFIG ----------------
-const char* AP_SSID       = "ESP32_UV_WiFi_Setup";
-const char* MQTT_BROKER   = "broker.hivemq.com";
-const uint16_t MQTT_PORT  = 1883;
-const char* MQTT_TOPIC    = "venkat_iot/sensors/uv/node_01";
-
-Preferences prefs;
 WebServer server(80);
-DNSServer dnsServer;
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
-String savedSsid       = "";
-String savedPass       = "";
-String savedInfluxUrl  = "";
-String savedInfluxTok  = "";
+// ================= 3. MQTT & INFLUXDB CONFIG =============
+const char* MQTT_BROKER   = "broker.hivemq.com";
+const int   MQTT_PORT     = 1883;
+const char* MQTT_TOPIC    = "venkat_iot/sensors/uv/node_01";
+const char* DEVICE_ID     = "nRF5280_node_01";
 
-// ---------------- 3-FILTER DSP STATE (MEDIAN, KALMAN, HYBRID) ----------------
+#define INFLUXDB_URL    "https://us-east-1-1.aws.cloud2.influxdata.com/api/v2/write?org=IOT&bucket=uv_sensor_data&precision=s"
+#define INFLUXDB_TOKEN  "Dbzt7IHP3G4E4McgOmsRBrZLUaK2fsEgexNVFzYSQI1V2PhqWbL6SFhB64Vg-jOY6HQIu7BibH8jkSQvHqLNWw=="
+
+// ================= 4. DSP & FILTER STATE ===============
 #define MEDIAN_WIN_SIZE 9
 float winBuf[MEDIAN_WIN_SIZE];
 int winCount = 0;
@@ -48,41 +44,33 @@ bool filterInitialized = false;
 float kalX = 0.0f, kalP = 1.0f;
 float hybX = 0.0f, hybP = 1.0f;
 
-// Latest Telemetry Values
-float latestMvRaw      = 0.0f;
-float latestMvMedian   = 0.0f;
-float latestMvKalman   = 0.0f;
-float latestMvHybrid   = 0.0f;
-float latestUviCal     = 0.0f;
-float latestUviLin     = 0.0f;
-int   latestUviInt     = 0;
-String latestRisk      = "Low";
+unsigned long lastSampleMillis = 0;
+const unsigned long SAMPLE_INTERVAL_MS = 500;
+uint32_t packetSeq = 0;
 
-unsigned long lastSampleMs = 0;
-const unsigned long SAMPLE_INTERVAL_MS = 2000;
+float currentMvRaw    = 0.0f;
+float currentMvMedian = 0.0f;
+float currentMvKalman = 0.0f;
+float currentMvHybrid = 0.0f;
+float currentUvIndex  = 0.0f;
+String currentRisk    = "Low";
+int currentRssi       = 0;
 
-// ---------------- GUVA-S12SD PIECEWISE CALIBRATION ----------------
-const float MV_THRESHOLDS[12] = {
+// ================= 5. PIECEWISE CALIBRATION ============
+const float UVI_THRESHOLDS[12] = {
   50.0f, 227.0f, 318.0f, 408.0f, 503.0f, 606.0f,
   696.0f, 795.0f, 881.0f, 976.0f, 1079.0f, 1170.0f
 };
 
-int lookupDiscreteUVI(float mv) {
-  if (mv < 50.0f) return 0;
-  for (int uvi = 11; uvi >= 1; uvi--) {
-    if (mv >= MV_THRESHOLDS[uvi]) return uvi;
+float getCalibratedUVI(float mv) {
+  if (mv < UVI_THRESHOLDS[0]) return 0.0f;
+  if (mv >= UVI_THRESHOLDS[11]) {
+    float finalSlope = (11.0f - 10.0f) / (UVI_THRESHOLDS[11] - UVI_THRESHOLDS[10]);
+    return 11.0f + ((mv - UVI_THRESHOLDS[11]) * finalSlope);
   }
-  return 0;
-}
-
-float calculateCalibratedUVI(float mv) {
-  if (mv < 50.0f) return 0.0f;
-  if (mv >= 1170.0f) return 11.0f + (mv - 1170.0f) / 91.0f;
   for (int i = 0; i < 11; i++) {
-    float vLow = MV_THRESHOLDS[i];
-    float vHigh = MV_THRESHOLDS[i + 1];
-    if (mv >= vLow && mv <= vHigh) {
-      return i + (mv - vLow) / (vHigh - vLow);
+    if (mv >= UVI_THRESHOLDS[i] && mv <= UVI_THRESHOLDS[i+1]) {
+      return i + ((mv - UVI_THRESHOLDS[i]) / (UVI_THRESHOLDS[i+1] - UVI_THRESHOLDS[i]));
     }
   }
   return 0.0f;
@@ -96,23 +84,25 @@ String getRiskCategory(float uvi) {
   return "Extreme";
 }
 
-// ---------------- ANALOG READ & 3-FILTER ENGINE ----------------
-float readSensorMillivolts() {
-  uint32_t sumMv = 0;
-  const int oversample = 16;
-  for (int i = 0; i < oversample; i++) {
-    sumMv += analogReadMilliVolts(UV_ADC_PIN);
+// ================= 6. SENSOR & FILTER PROCESSING ========
+float readAveragedMilliVolts() {
+  uint32_t totalMv = 0;
+  for (int i = 0; i < 32; i++) {
+    totalMv += analogReadMilliVolts(UV_SENSOR_PIN);
     delayMicroseconds(250);
   }
-  return (float)sumMv / (float)oversample;
+  return totalMv / 32.0f;
 }
 
-void update3Filters() {
-  float raw = readSensorMillivolts();
-  latestMvRaw = raw;
+void updateFiltersAndSensors() {
+  float raw = readAveragedMilliVolts();
+  currentMvRaw = raw; // Keeps actual measured raw value for logs/comparison
 
-  // 1. Sliding Window for Median Filter
-  winBuf[winIdx] = raw;
+  // Clamp unphysical noise spikes (above 1250 mV) so they don't poison the filters
+  float clampedRaw = constrain(raw, 0.0f, 1250.0f);
+
+  // Median Filter
+  winBuf[winIdx] = clampedRaw;
   winIdx = (winIdx + 1) % MEDIAN_WIN_SIZE;
   if (winCount < MEDIAN_WIN_SIZE) winCount++;
 
@@ -121,245 +111,190 @@ void update3Filters() {
   for (int i = 0; i < winCount - 1; i++) {
     for (int j = i + 1; j < winCount; j++) {
       if (sorted[j] < sorted[i]) {
-        float tmp = sorted[i];
-        sorted[i] = sorted[j];
-        sorted[j] = tmp;
+        float tmp = sorted[i]; sorted[i] = sorted[j]; sorted[j] = tmp;
       }
     }
   }
-  latestMvMedian = sorted[winCount / 2];
+  currentMvMedian = sorted[winCount / 2];
 
-  // 2. 1D Kalman Filter & 3. Hybrid (Median + Kalman) Filter
+  // Kalman & Hybrid Filters
   if (!filterInitialized) {
-    kalX = raw;
-    hybX = latestMvMedian;
+    kalX = clampedRaw;
+    hybX = currentMvMedian;
     filterInitialized = true;
   } else {
-    // 1D Kalman on Raw
     kalP += 0.05f;
-    float kG = kalP / (kalP + 2.5f);
-    kalX += kG * (raw - kalX);
+    float kG = kalP / (kalP + 1.0f);
+    kalX += kG * (clampedRaw - kalX);
     kalP = (1.0f - kG) * kalP;
 
-    // Hybrid: 1D Kalman on Median-filtered output
     hybP += 0.05f;
     float hG = hybP / (hybP + 1.5f);
-    hybX += hG * (latestMvMedian - hybX);
+    hybX += hG * (currentMvMedian - hybX);
     hybP = (1.0f - hG) * hybP;
   }
+  currentMvKalman = kalX;
+  currentMvHybrid = hybX;
 
-  latestMvKalman = kalX;
-  latestMvHybrid = hybX;
-
-  // Calibrate UV Index using Hybrid filter output
-  latestUviCal = calculateCalibratedUVI(latestMvHybrid);
-  latestUviLin = latestMvHybrid / 100.0f;
-  latestUviInt = lookupDiscreteUVI(latestMvHybrid);
-  latestRisk   = getRiskCategory(latestUviCal);
+  currentUvIndex = getCalibratedUVI(currentMvHybrid);
+  currentRisk    = getRiskCategory(currentUvIndex);
+  currentRssi    = WiFi.RSSI();
 }
 
-// ---------------- PAYLOAD BUILDER ----------------
-String buildTelemetryJson() {
+// ================= 7. HTTP SERVER ENDPOINT =============
+void handleJsonData() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  server.sendHeader("Access-Control-Allow-Headers", "*");
+
   JsonDocument doc;
-  doc["mv_raw"]       = serialized(String(latestMvRaw, 2));
-  doc["mv_median"]    = serialized(String(latestMvMedian, 2));
-  doc["mv_kalman"]    = serialized(String(latestMvKalman, 2));
-  doc["mv_hybrid"]    = serialized(String(latestMvHybrid, 2));
-  doc["uvi_cal"]      = serialized(String(latestUviCal, 3));
-  doc["uvi_lin"]      = serialized(String(latestUviLin, 3));
-  doc["uvi_int"]      = latestUviInt;
-  doc["risk"]         = latestRisk;
-  doc["rssi_dbm"]     = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : 0;
-  doc["ip"]           = (WiFi.status() == WL_CONNECTED)
-                          ? WiFi.localIP().toString()
-                          : WiFi.softAPIP().toString();
+  doc["seq"]                = packetSeq;
+  doc["device_id"]          = DEVICE_ID;
+  doc["mv_raw"]             = serialized(String(currentMvRaw, 2));
+  doc["mv_median"]          = serialized(String(currentMvMedian, 2));
+  doc["mv_kalman"]          = serialized(String(currentMvKalman, 2));
+  doc["mv_hybrid"]          = serialized(String(currentMvHybrid, 2));
+  doc["uv_index_estimated"] = serialized(String(currentUvIndex, 3));
+  doc["risk_category"]      = currentRisk;
+  doc["rssi_dbm"]           = currentRssi;
+  doc["ip"]                 = WiFi.localIP().toString();
 
-  String output;
-  serializeJson(doc, output);
-  return output;
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
 }
 
-// ---------------- CLOUD STREAMING (MQTT + INFLUXDB) ----------------
-void publishToHiveMq(const String& jsonPayload) {
-  if (WiFi.status() != WL_CONNECTED) return;
+// ================= 8. WIFI CONNECTION ==================
+void connectWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  if (!mqttClient.connected()) {
-    String clientId = "esp32c3_uv_" + String((uint32_t)ESP.getEfuseMac(), HEX);
-    mqttClient.connect(clientId.c_str());
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("Connecting Wi-Fi...");
+    display.print("SSID: ");
+    display.println(WIFI_SSID);
+    display.display();
   }
-  if (mqttClient.connected()) {
-    mqttClient.publish(MQTT_TOPIC, jsonPayload.c_str());
-  }
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("ESP32 Connected!");
+  display.setCursor(0, 16);
+  display.println("IP Address:");
+  display.setCursor(0, 32);
+  display.println(WiFi.localIP().toString());
+  display.display();
+  delay(3000);
 }
 
-void pushToInfluxDb() {
+// ================= 9. CLOUD STREAMING ==================
+void publishToInfluxDb() {
   if (WiFi.status() != WL_CONNECTED) return;
-  if (savedInfluxUrl.length() < 8 || savedInfluxTok.length() < 4) return;
+  static int cloudSyncCounter = 0;
+  cloudSyncCounter++;
+  if (cloudSyncCounter < 5) {
+    return; 
+  }
+  cloudSyncCounter = 0;
 
   NetworkClientSecure client;
   client.setInsecure();
   HTTPClient https;
 
-  if (https.begin(client, savedInfluxUrl)) {
-    https.addHeader("Authorization", "Token " + savedInfluxTok);
+  if (https.begin(client, INFLUXDB_URL)) {
+    https.addHeader("Authorization", "Token " + String(INFLUXDB_TOKEN));
     https.addHeader("Content-Type", "text/plain; charset=utf-8");
 
-    String line = "uv_telemetry,node=esp32c3_01 ";
-    line += "mv_raw=" + String(latestMvRaw, 2) + ",";
-    line += "mv_median=" + String(latestMvMedian, 2) + ",";
-    line += "mv_kalman=" + String(latestMvKalman, 2) + ",";
-    line += "mv_hybrid=" + String(latestMvHybrid, 2) + ",";
-    line += "uvi_cal=" + String(latestUviCal, 3) + ",";
-    line += "uvi_int=" + String(latestUviInt) + "i";
+    String lineProtocol = String("uv_measurement,device=") + DEVICE_ID + " ";
+    lineProtocol += "voltage_raw_mv=" + String(currentMvRaw, 2) + ",";
+    lineProtocol += "voltage_median_mv=" + String(currentMvMedian, 2) + ",";
+    lineProtocol += "voltage_kalman_mv=" + String(currentMvKalman, 2) + ",";
+    lineProtocol += "voltage_hybrid_mv=" + String(currentMvHybrid, 2) + ",";
+    lineProtocol += "uv_index_estimated=" + String(currentUvIndex, 3);
 
-    https.POST(line);
+    https.POST(lineProtocol);
     https.end();
   }
 }
 
-// ---------------- OLED DISPLAY UPDATE ----------------
-void updateOledDisplay() {
-  if (!oledAvailable) return;
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-
-  display.setCursor(0, 0);
-  if (WiFi.status() == WL_CONNECTED) {
-    display.print("IP:");
-    display.println(WiFi.localIP());
-  } else {
-    display.println("AP: 192.168.4.1");
-  }
-
-  display.setCursor(0, 12);
-  display.printf("Raw: %.1f | Med: %.1f\n", latestMvRaw, latestMvMedian);
-  display.printf("Kal: %.1f | Hyb: %.1f\n", latestMvKalman, latestMvHybrid);
-
-  display.setTextSize(2);
-  display.setCursor(0, 34);
-  display.printf("UVI: %.2f\n", latestUviCal);
-
-  display.setTextSize(1);
-  display.setCursor(0, 54);
-  display.printf("Risk: %s (Step %d)", latestRisk.c_str(), latestUviInt);
-  display.display();
-}
-
-// ---------------- HTTP ENDPOINTS & CORS ----------------
-void sendCorsHeaders() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  server.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  server.sendHeader("Access-Control-Allow-Headers", "*");
-}
-
-void setupWebServer() {
-  server.on("/data", HTTP_GET, []() {
-    sendCorsHeaders();
-    server.send(200, "application/json", buildTelemetryJson());
-  });
-
-  server.on("/scan", HTTP_GET, []() {
-    sendCorsHeaders();
-    int n = WiFi.scanNetworks();
-    JsonDocument doc;
-    JsonArray arr = doc["networks"].to<JsonArray>();
-    for (int i = 0; i < n; i++) {
-      JsonObject net = arr.add<JsonObject>();
-      net["ssid"] = WiFi.SSID(i);
-      net["rssi"] = WiFi.RSSI(i);
-    }
-    String out;
-    serializeJson(doc, out);
-    server.send(200, "application/json", out);
-  });
-
-  server.on("/wifi", HTTP_POST, []() {
-    sendCorsHeaders();
-    String ssid = server.arg("ssid");
-    String pass = server.arg("pass");
-    String iUrl = server.arg("influx_url");
-    String iTok = server.arg("influx_token");
-
-    if (ssid.length() > 0) {
-      prefs.begin("uv_cfg", false);
-      prefs.putString("ssid", ssid);
-      prefs.putString("pass", pass);
-      if (iUrl.length() > 0) prefs.putString("iurl", iUrl);
-      if (iTok.length() > 0) prefs.putString("itok", iTok);
-      prefs.end();
-
-      savedSsid = ssid;
-      savedPass = pass;
-      if (iUrl.length() > 0) savedInfluxUrl = iUrl;
-      if (iTok.length() > 0) savedInfluxTok = iTok;
-
-      server.send(200, "application/json", "{\"status\":\"reconnecting\"}");
-      delay(400);
-      WiFi.disconnect();
-      WiFi.begin(savedSsid.c_str(), savedPass.c_str());
-    } else {
-      server.send(400, "application/json", "{\"error\":\"missing_ssid\"}");
-    }
-  });
-
-  server.onNotFound([]() {
-    sendCorsHeaders();
-    server.send(200, "application/json", buildTelemetryJson());
-  });
-
-  server.begin();
-}
-
-// ---------------- SETUP & MAIN LOOP ----------------
+// ================= 10. SETUP & LOOP ====================
 void setup() {
   Serial.begin(115200);
   analogReadResolution(12);
-  analogSetPinAttenuation(UV_ADC_PIN, ADC_11db);
+  analogSetPinAttenuation(UV_SENSOR_PIN, ADC_11db);
 
-  Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
-  if (display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    oledAvailable = true;
-    display.clearDisplay();
-    display.display();
-  }
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
 
-  prefs.begin("uv_cfg", true);
-  savedSsid      = prefs.getString("ssid", "");
-  savedPass      = prefs.getString("pass", "");
-  savedInfluxUrl = prefs.getString("iurl", "");
-  savedInfluxTok = prefs.getString("itok", "");
-  prefs.end();
+  connectWiFi();
 
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(AP_SSID);
-  dnsServer.start(53, "*", WiFi.softAPIP());
-
-  if (savedSsid.length() > 0) {
-    WiFi.begin(savedSsid.c_str(), savedPass.c_str());
-  }
+  server.on("/data", HTTP_GET, handleJsonData);
+  server.on("/data", HTTP_OPTIONS, []() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(204);
+  });
+  server.begin();
 
   mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
   mqttClient.setBufferSize(512);
-  setupWebServer();
 }
 
 void loop() {
-  dnsServer.processNextRequest();
   server.handleClient();
-  if (WiFi.status() == WL_CONNECTED) {
-    mqttClient.loop();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    connectWiFi();
   }
 
-  unsigned long now = millis();
-  if (now - lastSampleMs >= SAMPLE_INTERVAL_MS) {
-    lastSampleMs = now;
-    update3Filters();
-    updateOledDisplay();
+  if (!mqttClient.connected()) {
+    String clientId = String(DEVICE_ID) + "_" + String(random(0xffff), HEX);
+    mqttClient.connect(clientId.c_str());
+  }
+  mqttClient.loop();
 
-    String payload = buildTelemetryJson();
-    Serial.println(payload);
-    publishToHiveMq(payload);
-    pushToInfluxDb();
+  unsigned long now = millis();
+  if (now - lastSampleMillis >= SAMPLE_INTERVAL_MS) {
+    lastSampleMillis = now;
+    packetSeq++;
+
+    updateFiltersAndSensors();
+
+    // Publish to MQTT (HiveMQ)
+    JsonDocument doc;
+    doc["seq"]                = packetSeq;
+    doc["device_id"]          = DEVICE_ID;
+    doc["mv_raw"]             = serialized(String(currentMvRaw, 2));
+    doc["mv_median"]          = serialized(String(currentMvMedian, 2));
+    doc["mv_kalman"]          = serialized(String(currentMvKalman, 2));
+    doc["mv_hybrid"]          = serialized(String(currentMvHybrid, 2));
+    doc["uv_index_estimated"] = serialized(String(currentUvIndex, 3));
+    doc["risk_category"]      = currentRisk;
+    doc["rssi_dbm"]           = currentRssi;
+
+    char jsonBuffer[384];
+    serializeJson(doc, jsonBuffer);
+    mqttClient.publish(MQTT_TOPIC, jsonBuffer);
+
+    // Publish to InfluxDB Cloud
+    publishToInfluxDb();
+
+    // OLED Display Update
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.printf("IP:%s\n", WiFi.localIP().toString().c_str());
+    display.println("--------------------");
+    display.printf("Hyb mV: %.2f\n", currentMvHybrid);
+    display.printf("UV Idx: %.3f\n", currentUvIndex);
+    display.printf("RSSI:   %d dBm (#%lu)\n", currentRssi, packetSeq);
+    display.display();
   }
 }
